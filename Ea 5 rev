@@ -1,0 +1,590 @@
+//+------------------------------------------------------------------+
+//|                 HYBRID SCALPING V8                               |
+//|                 XAUUSD M1 INVERT SIGNAL                          |
+//+------------------------------------------------------------------+
+#property strict
+#property version "8.00"
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//====================== SETTINGS ======================
+
+input ENUM_TIMEFRAMES TradeTF = PERIOD_M1;
+
+input double RiskPercent = 0.5;
+input int MaxPositions = 3;
+input double DailyLossLimit = 2.0;
+
+input int FastEMA = 20;
+input int SlowEMA = 50;
+input int RSIPeriod = 14;
+
+input double StopLossPips = 100;
+input double TakeProfitPips = 150;
+input double TrailingPips = 50;
+
+input int MaxSpreadPoints = 80;
+
+input bool EnableSignalReversal = true;
+
+input ulong MagicNumber = 20261109;
+
+//====================== INDICATOR HANDLES ======================
+
+int hFastEMA = INVALID_HANDLE;
+int hSlowEMA = INVALID_HANDLE;
+int hRSI = INVALID_HANDLE;
+
+datetime lastBar = 0;
+
+double dailyStartEquity = 0;
+string dailyKey = "";
+
+//====================== PIP CONVERSION ======================
+
+double PipValue()
+{
+   if(_Digits == 3 || _Digits == 5)
+      return _Point * 10.0;
+
+   return _Point;
+}
+
+//====================== DAILY EQUITY ======================
+
+void UpdateDailyEquity()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   dailyKey = StringFormat(
+      "HSC8_%I64d_%s_%I64d_%04d%02d%02d",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      _Symbol,
+      MagicNumber,
+      dt.year,
+      dt.mon,
+      dt.day
+   );
+
+   if(!GlobalVariableCheck(dailyKey))
+   {
+      GlobalVariableSet(
+         dailyKey,
+         AccountInfoDouble(ACCOUNT_EQUITY)
+      );
+   }
+
+   dailyStartEquity = GlobalVariableGet(dailyKey);
+}
+
+//====================== INITIALIZATION ======================
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(30);
+
+   hFastEMA = iMA(
+      _Symbol, TradeTF, FastEMA,
+      0, MODE_EMA, PRICE_CLOSE
+   );
+
+   hSlowEMA = iMA(
+      _Symbol, TradeTF, SlowEMA,
+      0, MODE_EMA, PRICE_CLOSE
+   );
+
+   hRSI = iRSI(
+      _Symbol, TradeTF, RSIPeriod, PRICE_CLOSE
+   );
+
+   if(hFastEMA == INVALID_HANDLE ||
+      hSlowEMA == INVALID_HANDLE ||
+      hRSI == INVALID_HANDLE)
+   {
+      Print("GAGAL MEMBUAT INDIKATOR");
+      return INIT_FAILED;
+   }
+
+   UpdateDailyEquity();
+
+   Print("================================");
+   Print("HYBRID SCALPING V8 ACTIVE");
+   Print("MODE: M1 INVERT SIGNAL");
+   Print("SIGNAL REVERSAL: ",
+         EnableSignalReversal ? "ON" : "OFF");
+   Print("SYMBOL: ", _Symbol);
+   Print("SL: ", StopLossPips, " PIPS");
+   Print("TP: ", TakeProfitPips, " PIPS");
+   Print("TRAILING: ", TrailingPips, " PIPS");
+   Print("================================");
+
+   return INIT_SUCCEEDED;
+}
+
+//====================== POSITION COUNT ======================
+
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == (long)MagicNumber)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//====================== LOT CALCULATION ======================
+
+double CalculateLot(
+   ENUM_ORDER_TYPE type,
+   double entry,
+   double sl
+)
+{
+   double riskMoney =
+      AccountInfoDouble(ACCOUNT_EQUITY) *
+      RiskPercent / 100.0;
+
+   double profit = 0;
+
+   if(!OrderCalcProfit(
+      type, _Symbol, 1.0,
+      entry, sl, profit
+   ))
+   {
+      Print("OrderCalcProfit gagal");
+      return 0;
+   }
+
+   double lossPerLot = MathAbs(profit);
+
+   if(lossPerLot <= 0)
+      return 0;
+
+   double lot = riskMoney / lossPerLot;
+
+   double minLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MIN
+   );
+
+   double maxLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MAX
+   );
+
+   double step = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_STEP
+   );
+
+   if(step <= 0)
+      return 0;
+
+   lot = MathFloor(lot / step) * step;
+   lot = MathMin(lot, maxLot);
+
+   if(lot < minLot)
+   {
+      Print("LOT DI BAWAH MINIMUM BROKER");
+      return 0;
+   }
+
+   int digits = 2;
+
+   if(step >= 1.0) digits = 0;
+   else if(step >= 0.1) digits = 1;
+   else if(step >= 0.01) digits = 2;
+   else if(step >= 0.001) digits = 3;
+   else digits = 4;
+
+   return NormalizeDouble(lot, digits);
+}
+
+//====================== TRAILING STOP ======================
+
+void ManageTrailing()
+{
+   double distance = TrailingPips * PipValue();
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   int stopLevel = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minDistance = stopLevel * _Point;
+
+   if(distance < minDistance)
+      distance = minDistance;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         double newSL = NormalizeDouble(
+            tick.bid - distance,
+            _Digits
+         );
+
+         if((oldSL == 0 || newSL > oldSL) &&
+            tick.bid - newSL >= minDistance)
+         {
+            if(!trade.PositionModify(ticket, newSL, tp))
+               Print("BUY TRAILING FAILED: ",
+                     trade.ResultRetcodeDescription());
+         }
+      }
+
+      else if(type == POSITION_TYPE_SELL)
+      {
+         double newSL = NormalizeDouble(
+            tick.ask + distance,
+            _Digits
+         );
+
+         if((oldSL == 0 || newSL < oldSL) &&
+            newSL - tick.ask >= minDistance)
+         {
+            if(!trade.PositionModify(ticket, newSL, tp))
+               Print("SELL TRAILING FAILED: ",
+                     trade.ResultRetcodeDescription());
+         }
+      }
+   }
+}
+
+//====================== SIGNAL ENGINE ======================
+
+int GetSignal()
+{
+   double fast[];
+   double slow[];
+   double rsi[];
+
+   ArraySetAsSeries(fast, true);
+   ArraySetAsSeries(slow, true);
+   ArraySetAsSeries(rsi, true);
+
+   if(CopyBuffer(hFastEMA, 0, 1, 2, fast) < 2)
+      return 0;
+
+   if(CopyBuffer(hSlowEMA, 0, 1, 1, slow) < 1)
+      return 0;
+
+   if(CopyBuffer(hRSI, 0, 1, 1, rsi) < 1)
+      return 0;
+
+   MqlRates rates[];
+
+   ArraySetAsSeries(rates, true);
+
+   if(CopyRates(_Symbol, TradeTF, 1, 1, rates) < 1)
+      return 0;
+
+   int buyScore = 0;
+   int sellScore = 0;
+
+   // EMA trend
+   if(fast[0] > slow[0])
+      buyScore += 2;
+   else if(fast[0] < slow[0])
+      sellScore += 2;
+
+   // Harga terhadap EMA 20
+   if(rates[0].close > fast[0])
+      buyScore++;
+   else if(rates[0].close < fast[0])
+      sellScore++;
+
+   // RSI momentum
+   if(rsi[0] > 50)
+      buyScore++;
+   else if(rsi[0] < 50)
+      sellScore++;
+
+   // Kemiringan EMA 20
+   if(fast[0] > fast[1])
+      buyScore++;
+   else if(fast[0] < fast[1])
+      sellScore++;
+
+   if(buyScore > sellScore)
+      return 1;
+
+   if(sellScore > buyScore)
+      return -1;
+
+   // Tie breaker RSI
+   if(rsi[0] >= 50)
+      return 1;
+
+   return -1;
+}
+
+//====================== DAILY LOSS CHECK ======================
+
+bool DailyLossReached()
+{
+   if(dailyStartEquity <= 0)
+      return true;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double loss =
+      (dailyStartEquity - equity) /
+      dailyStartEquity * 100.0;
+
+   if(loss >= DailyLossLimit)
+   {
+      Print("DAILY LOSS LIMIT: ", loss, "%");
+      return true;
+   }
+
+   return false;
+}
+
+//====================== ORDER EXECUTION ======================
+
+void OpenSignal(int signal)
+{
+   if(CountPositions() >= MaxPositions)
+   {
+      Print("SIGNAL ADA, MAX POSITIONS TERCAPAI");
+      return;
+   }
+
+   if(DailyLossReached())
+      return;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   double spread =
+      (tick.ask - tick.bid) / _Point;
+
+   if(spread > MaxSpreadPoints)
+   {
+      Print("SPREAD TERLALU TINGGI: ", spread);
+      return;
+   }
+
+   double pip = PipValue();
+
+   double slDistance = StopLossPips * pip;
+   double tpDistance = TakeProfitPips * pip;
+
+   int stopLevel = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minDistance = stopLevel * _Point + _Point;
+
+   if(slDistance < minDistance)
+      slDistance = minDistance;
+
+   if(tpDistance < minDistance)
+      tpDistance = minDistance;
+
+   //====================== BUY ======================
+
+   if(signal == 1)
+   {
+      double entry = tick.ask;
+
+      double sl = NormalizeDouble(
+         entry - slDistance,
+         _Digits
+      );
+
+      double tp = NormalizeDouble(
+         entry + tpDistance,
+         _Digits
+      );
+
+      double lot = CalculateLot(
+         ORDER_TYPE_BUY,
+         entry,
+         sl
+      );
+
+      if(lot <= 0)
+         return;
+
+      bool result = trade.Buy(
+         lot,
+         _Symbol,
+         0,
+         sl,
+         tp,
+         "HSC8 BUY"
+      );
+
+      if(result &&
+         (trade.ResultRetcode() == TRADE_RETCODE_DONE ||
+          trade.ResultRetcode() == TRADE_RETCODE_PLACED))
+      {
+         Print("BUY OPENED | LOT: ", lot,
+               " | SL: ", sl, " | TP: ", tp);
+      }
+      else
+      {
+         Print("BUY FAILED: ",
+               trade.ResultRetcodeDescription());
+      }
+   }
+
+   //====================== SELL ======================
+
+   else if(signal == -1)
+   {
+      double entry = tick.bid;
+
+      double sl = NormalizeDouble(
+         entry + slDistance,
+         _Digits
+      );
+
+      double tp = NormalizeDouble(
+         entry - tpDistance,
+         _Digits
+      );
+
+      double lot = CalculateLot(
+         ORDER_TYPE_SELL,
+         entry,
+         sl
+      );
+
+      if(lot <= 0)
+         return;
+
+      bool result = trade.Sell(
+         lot,
+         _Symbol,
+         0,
+         sl,
+         tp,
+         "HSC8 SELL"
+      );
+
+      if(result &&
+         (trade.ResultRetcode() == TRADE_RETCODE_DONE ||
+          trade.ResultRetcode() == TRADE_RETCODE_PLACED))
+      {
+         Print("SELL OPENED | LOT: ", lot,
+               " | SL: ", sl, " | TP: ", tp);
+      }
+      else
+      {
+         Print("SELL FAILED: ",
+               trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//====================== MAIN ======================
+
+void OnTick()
+{
+   // Trailing setiap tick
+   ManageTrailing();
+
+   // Evaluasi satu kali setiap candle baru
+   datetime currentBar = iTime(_Symbol, TradeTF, 0);
+
+   if(currentBar == 0 || currentBar == lastBar)
+      return;
+
+   lastBar = currentBar;
+
+   // Reset tanggal
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   string today = StringFormat(
+      "%04d%02d%02d",
+      dt.year,
+      dt.mon,
+      dt.day
+   );
+
+   if(StringFind(dailyKey, today) < 0)
+      UpdateDailyEquity();
+
+   // Baca sinyal asli
+   int originalSignal = GetSignal();
+
+   if(originalSignal == 0)
+   {
+      Print("WAITING INDICATOR DATA");
+      return;
+   }
+
+   //====================== SIGNAL REVERSAL ======================
+
+   int finalSignal = originalSignal;
+
+   if(EnableSignalReversal)
+      finalSignal = -originalSignal;
+
+   //====================== DISPLAY ======================
+
+   Print(
+      "ORIGINAL: ",
+      originalSignal == 1 ? "BUY" : "SELL",
+      " | EXECUTION: ",
+      finalSignal == 1 ? "BUY" : "SELL"
+   );
+
+   // Eksekusi sinyal hasil pembalikan
+   OpenSignal(finalSignal);
+}
+
+//====================== DEINITIALIZATION ======================
+
+void OnDeinit(const int reason)
+{
+   if(hFastEMA != INVALID_HANDLE)
+      IndicatorRelease(hFastEMA);
+
+   if(hSlowEMA != INVALID_HANDLE)
+      IndicatorRelease(hSlowEMA);
+
+   if(hRSI != INVALID_HANDLE)
+      IndicatorRelease(hRSI);
+
+   Print("HYBRID SCALPING V8 STOPPED");
+}
+
+//+------------------------------------------------------------------+
