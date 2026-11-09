@@ -1,0 +1,461 @@
+//+------------------------------------------------------------------+
+//|                 HYBRID SCALPING V6                               |
+//|                 XAUUSD CANDLE DIRECTION M1                       |
+//+------------------------------------------------------------------+
+#property strict
+#property version "6.00"
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//====================== SETTINGS ======================
+
+input ENUM_TIMEFRAMES TradeTF = PERIOD_M1;
+
+input double RiskPercent = 0.5;
+input int MaxPositions = 3;
+input double DailyLossLimit = 2.0;
+
+input int ATRPeriod = 14;
+input double SL_ATR = 1.2;
+input double TP_ATR = 1.5;
+input double Trail_ATR = 1.0;
+
+input int MaxSpreadPoints = 80;
+input ulong MagicNumber = 20261109;
+
+//====================== HANDLES ======================
+
+int hATR = INVALID_HANDLE;
+
+datetime lastBar = 0;
+
+double dailyStartEquity = 0;
+string dailyKey = "";
+
+//====================== DAILY EQUITY ======================
+
+void UpdateDailyEquity()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   dailyKey = StringFormat(
+      "HSC6_%I64d_%s_%I64d_%04d%02d%02d",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      _Symbol,
+      MagicNumber,
+      dt.year,
+      dt.mon,
+      dt.day
+   );
+
+   if(!GlobalVariableCheck(dailyKey))
+   {
+      GlobalVariableSet(
+         dailyKey,
+         AccountInfoDouble(ACCOUNT_EQUITY)
+      );
+   }
+
+   dailyStartEquity = GlobalVariableGet(dailyKey);
+}
+
+//====================== INITIALIZATION ======================
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(30);
+
+   hATR = iATR(_Symbol, TradeTF, ATRPeriod);
+
+   if(hATR == INVALID_HANDLE)
+   {
+      Print("Gagal membuat indikator ATR");
+      return INIT_FAILED;
+   }
+
+   UpdateDailyEquity();
+
+   Print("================================");
+   Print("HYBRID SCALPING V6 ACTIVE");
+   Print("MODE: CANDLE DIRECTION M1");
+   Print("SYMBOL: ", _Symbol);
+   Print("RISK: ", RiskPercent, "%");
+   Print("MAX POSITIONS: ", MaxPositions);
+   Print("================================");
+
+   return INIT_SUCCEEDED;
+}
+
+//====================== POSITION COUNT ======================
+
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == (long)MagicNumber)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//====================== LOT CALCULATION ======================
+
+double CalculateLot(
+   ENUM_ORDER_TYPE type,
+   double entry,
+   double sl
+)
+{
+   double riskMoney =
+      AccountInfoDouble(ACCOUNT_EQUITY) *
+      RiskPercent / 100.0;
+
+   double profit = 0;
+
+   if(!OrderCalcProfit(
+      type, _Symbol, 1.0,
+      entry, sl, profit
+   ))
+   {
+      Print("OrderCalcProfit gagal");
+      return 0;
+   }
+
+   double lossPerLot = MathAbs(profit);
+
+   if(lossPerLot <= 0)
+      return 0;
+
+   double lot = riskMoney / lossPerLot;
+
+   double minLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MIN
+   );
+
+   double maxLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MAX
+   );
+
+   double step = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_STEP
+   );
+
+   if(step <= 0)
+      return 0;
+
+   lot = MathFloor(lot / step) * step;
+   lot = MathMin(lot, maxLot);
+
+   if(lot < minLot)
+   {
+      Print("Lot terlalu kecil untuk minimum broker");
+      return 0;
+   }
+
+   int digits = 2;
+
+   if(step >= 1.0) digits = 0;
+   else if(step >= 0.1) digits = 1;
+   else if(step >= 0.01) digits = 2;
+   else if(step >= 0.001) digits = 3;
+   else digits = 4;
+
+   return NormalizeDouble(lot, digits);
+}
+
+//====================== TRAILING STOP ======================
+
+void ManageTrailing()
+{
+   double atr[];
+
+   ArraySetAsSeries(atr, true);
+
+   if(CopyBuffer(hATR, 0, 1, 1, atr) < 1)
+      return;
+
+   double distance = atr[0] * Trail_ATR;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   int stopLevel = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minDistance = stopLevel * _Point;
+
+   if(distance < minDistance)
+      distance = minDistance;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         double newSL = NormalizeDouble(
+            tick.bid - distance,
+            _Digits
+         );
+
+         if((oldSL == 0 || newSL > oldSL) &&
+            tick.bid - newSL >= minDistance)
+         {
+            trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+      else if(type == POSITION_TYPE_SELL)
+      {
+         double newSL = NormalizeDouble(
+            tick.ask + distance,
+            _Digits
+         );
+
+         if((oldSL == 0 || newSL < oldSL) &&
+            newSL - tick.ask >= minDistance)
+         {
+            trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+   }
+}
+
+//====================== MAIN ======================
+
+void OnTick()
+{
+   ManageTrailing();
+
+   // Evaluasi hanya pada candle baru
+   datetime currentBar = iTime(_Symbol, TradeTF, 0);
+
+   if(currentBar == 0 || currentBar == lastBar)
+      return;
+
+   lastBar = currentBar;
+
+   // Reset harian
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   string today = StringFormat(
+      "%04d%02d%02d",
+      dt.year, dt.mon, dt.day
+   );
+
+   if(StringFind(dailyKey, today) < 0)
+      UpdateDailyEquity();
+
+   // Daily loss limit
+   if(dailyStartEquity <= 0)
+      return;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double dailyLoss =
+      (dailyStartEquity - equity) /
+      dailyStartEquity * 100.0;
+
+   if(dailyLoss >= DailyLossLimit)
+   {
+      Print("DAILY LOSS LIMIT: ", dailyLoss, "%");
+      return;
+   }
+
+   // Max positions
+   if(CountPositions() >= MaxPositions)
+      return;
+
+   // Spread filter
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   double spread =
+      (tick.ask - tick.bid) / _Point;
+
+   if(spread > MaxSpreadPoints)
+      return;
+
+   //====================== CANDLE DIRECTION ======================
+
+   MqlRates rates[];
+
+   ArraySetAsSeries(rates, true);
+
+   if(CopyRates(_Symbol, TradeTF, 1, 2, rates) < 2)
+      return;
+
+   bool buySignal = false;
+   bool sellSignal = false;
+
+   // Candle bullish = BUY
+   if(rates[0].close > rates[0].open)
+      buySignal = true;
+
+   // Candle bearish = SELL
+   else if(rates[0].close < rates[0].open)
+      sellSignal = true;
+
+   else
+      return;
+
+   //====================== ATR ======================
+
+   double atr[];
+
+   ArraySetAsSeries(atr, true);
+
+   if(CopyBuffer(hATR, 0, 1, 1, atr) < 1)
+      return;
+
+   if(atr[0] <= 0)
+      return;
+
+   double slDistance = atr[0] * SL_ATR;
+   double tpDistance = atr[0] * TP_ATR;
+
+   int stopLevel = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minDistance = stopLevel * _Point + _Point;
+
+   if(slDistance < minDistance)
+      slDistance = minDistance;
+
+   if(tpDistance < minDistance)
+      tpDistance = minDistance;
+
+   //====================== BUY ======================
+
+   if(buySignal)
+   {
+      double entry = tick.ask;
+
+      double sl = NormalizeDouble(
+         entry - slDistance,
+         _Digits
+      );
+
+      double tp = NormalizeDouble(
+         entry + tpDistance,
+         _Digits
+      );
+
+      double lot = CalculateLot(
+         ORDER_TYPE_BUY,
+         entry,
+         sl
+      );
+
+      if(lot <= 0)
+         return;
+
+      bool result = trade.Buy(
+         lot,
+         _Symbol,
+         0,
+         sl,
+         tp,
+         "HSC6 BUY"
+      );
+
+      if(result &&
+         (trade.ResultRetcode() == TRADE_RETCODE_DONE ||
+          trade.ResultRetcode() == TRADE_RETCODE_PLACED))
+      {
+         Print("BUY OPENED | LOT: ", lot);
+      }
+      else
+      {
+         Print("BUY FAILED: ", trade.ResultRetcodeDescription());
+      }
+   }
+
+   //====================== SELL ======================
+
+   else if(sellSignal)
+   {
+      double entry = tick.bid;
+
+      double sl = NormalizeDouble(
+         entry + slDistance,
+         _Digits
+      );
+
+      double tp = NormalizeDouble(
+         entry - tpDistance,
+         _Digits
+      );
+
+      double lot = CalculateLot(
+         ORDER_TYPE_SELL,
+         entry,
+         sl
+      );
+
+      if(lot <= 0)
+         return;
+
+      bool result = trade.Sell(
+         lot,
+         _Symbol,
+         0,
+         sl,
+         tp,
+         "HSC6 SELL"
+      );
+
+      if(result &&
+         (trade.ResultRetcode() == TRADE_RETCODE_DONE ||
+          trade.ResultRetcode() == TRADE_RETCODE_PLACED))
+      {
+         Print("SELL OPENED | LOT: ", lot);
+      }
+      else
+      {
+         Print("SELL FAILED: ", trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//====================== DEINIT ======================
+
+void OnDeinit(const int reason)
+{
+   if(hATR != INVALID_HANDLE)
+      IndicatorRelease(hATR);
+
+   Print("HYBRID SCALPING V6 STOPPED");
+}
