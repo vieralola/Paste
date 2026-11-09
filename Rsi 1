@@ -1,0 +1,299 @@
+//+------------------------------------------------------------------+
+//|                  RSI TOUCH SCALPER V1                            |
+//|                  MT5 EXPERT ADVISOR                               |
+//+------------------------------------------------------------------+
+#property strict
+#property version "1.00"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//==================== INPUT SETTINGS ====================//
+
+input group "=== RSI SETTINGS ==="
+input int RSI_Period = 14;
+input double RSI_Buy_Level = 20.0;
+input double RSI_Sell_Level = 80.0;
+
+input group "=== LOT SETTINGS ==="
+input double Fixed_Lot = 0.01;
+
+input group "=== TRADE SETTINGS ==="
+input int Max_Positions = 3;
+input int StopLoss_Points = 300;
+input int TakeProfit_Points = 300;
+
+input group "=== TRAILING PROFIT ==="
+input bool Enable_Trailing = true;
+input int Trailing_Start_Points = 150;
+input int Trailing_Distance_Points = 100;
+input int Trailing_Step_Points = 10;
+
+input group "=== GENERAL SETTINGS ==="
+input ulong Magic_Number = 20261109;
+input int Slippage_Points = 20;
+
+//==================== GLOBAL ====================//
+
+int rsiHandle = INVALID_HANDLE;
+double previousRSI = -1;
+
+//==================== INITIALIZATION ====================//
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(Magic_Number);
+   trade.SetDeviationInPoints(Slippage_Points);
+
+   rsiHandle = iRSI(
+      _Symbol,
+      PERIOD_M1,
+      RSI_Period,
+      PRICE_CLOSE
+   );
+
+   if(rsiHandle == INVALID_HANDLE)
+   {
+      Print("RSI initialization failed!");
+      return INIT_FAILED;
+   }
+
+   Print("RSI TOUCH SCALPER V1 STARTED");
+
+   return INIT_SUCCEEDED;
+}
+
+//==================== DEINITIALIZATION ====================//
+
+void OnDeinit(const int reason)
+{
+   if(rsiHandle != INVALID_HANDLE)
+      IndicatorRelease(rsiHandle);
+}
+
+//==================== COUNT POSITIONS ====================//
+
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != Magic_Number)
+         continue;
+
+      count++;
+   }
+
+   return count;
+}
+
+//==================== OPEN BUY ====================//
+
+void OpenBuy()
+{
+   if(CountPositions() >= Max_Positions)
+      return;
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   double sl = NormalizeDouble(
+      ask - StopLoss_Points * _Point,
+      _Digits
+   );
+
+   double tp = NormalizeDouble(
+      ask + TakeProfit_Points * _Point,
+      _Digits
+   );
+
+   bool result = trade.Buy(
+      Fixed_Lot,
+      _Symbol,
+      0,
+      sl,
+      tp,
+      "RSI BUY"
+   );
+
+   if(result)
+      Print("BUY OPENED");
+   else
+      Print("BUY FAILED: ", trade.ResultRetcodeDescription());
+}
+
+//==================== OPEN SELL ====================//
+
+void OpenSell()
+{
+   if(CountPositions() >= Max_Positions)
+      return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double sl = NormalizeDouble(
+      bid + StopLoss_Points * _Point,
+      _Digits
+   );
+
+   double tp = NormalizeDouble(
+      bid - TakeProfit_Points * _Point,
+      _Digits
+   );
+
+   bool result = trade.Sell(
+      Fixed_Lot,
+      _Symbol,
+      0,
+      sl,
+      tp,
+      "RSI SELL"
+   );
+
+   if(result)
+      Print("SELL OPENED");
+   else
+      Print("SELL FAILED: ", trade.ResultRetcodeDescription());
+}
+
+//==================== TRAILING PROFIT ====================//
+
+void ManageTrailing()
+{
+   if(!Enable_Trailing)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != Magic_Number)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      //================ BUY TRAILING =================//
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         double profitPoints = (bid - openPrice) / _Point;
+
+         if(profitPoints < Trailing_Start_Points)
+            continue;
+
+         double newSL = NormalizeDouble(
+            bid - Trailing_Distance_Points * _Point,
+            _Digits
+         );
+
+         if(currentSL == 0 ||
+            newSL > currentSL + Trailing_Step_Points * _Point)
+         {
+            if(newSL < bid)
+            {
+               if(!trade.PositionModify(ticket, newSL, currentTP))
+                  Print("BUY TRAILING FAILED: ",
+                        trade.ResultRetcodeDescription());
+            }
+         }
+      }
+
+      //================ SELL TRAILING =================//
+
+      if(type == POSITION_TYPE_SELL)
+      {
+         double profitPoints = (openPrice - ask) / _Point;
+
+         if(profitPoints < Trailing_Start_Points)
+            continue;
+
+         double newSL = NormalizeDouble(
+            ask + Trailing_Distance_Points * _Point,
+            _Digits
+         );
+
+         if(currentSL == 0 ||
+            newSL < currentSL - Trailing_Step_Points * _Point)
+         {
+            if(newSL > ask)
+            {
+               if(!trade.PositionModify(ticket, newSL, currentTP))
+                  Print("SELL TRAILING FAILED: ",
+                        trade.ResultRetcodeDescription());
+            }
+         }
+      }
+   }
+}
+
+//==================== RSI SIGNAL ====================//
+
+void CheckRSI()
+{
+   double rsiBuffer[1];
+
+   if(CopyBuffer(rsiHandle, 0, 0, 1, rsiBuffer) <= 0)
+      return;
+
+   double currentRSI = rsiBuffer[0];
+
+   if(previousRSI < 0)
+   {
+      previousRSI = currentRSI;
+      return;
+   }
+
+   // BUY: RSI menembus level 20 ke bawah
+
+   if(previousRSI > RSI_Buy_Level &&
+      currentRSI <= RSI_Buy_Level)
+   {
+      Print("RSI BUY SIGNAL: ", currentRSI);
+      OpenBuy();
+   }
+
+   // SELL: RSI menembus level 80 ke atas
+
+   if(previousRSI < RSI_Sell_Level &&
+      currentRSI >= RSI_Sell_Level)
+   {
+      Print("RSI SELL SIGNAL: ", currentRSI);
+      OpenSell();
+   }
+
+   previousRSI = currentRSI;
+}
+
+//==================== MAIN TICK ====================//
+
+void OnTick()
+{
+   ManageTrailing();
+
+   CheckRSI();
+}
+
+//+------------------------------------------------------------------+
