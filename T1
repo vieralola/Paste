@@ -1,0 +1,666 @@
+//+------------------------------------------------------------------+
+//|                  HYBRID SCALPING V1                              |
+//|                  FORCED ENTRY MODE                               |
+//|                  TREND + MOMENTUM + PRICE ACTION                  |
+//+------------------------------------------------------------------+
+#property strict
+#property version "1.00"
+#property description "HYBRID SCALPING V1 - FORCED ENTRY"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//====================== INPUT SETTINGS ======================
+
+input ENUM_TIMEFRAMES InpTimeframe = PERIOD_M1;
+
+input double RiskPercent       = 0.5;
+input int    MaxPositions      = 3;
+input int    MaxSpreadPoints   = 80;
+
+input int    ATRPeriod         = 14;
+input double SL_ATR_Multiplier = 1.2;
+input double TP_ATR_Multiplier = 1.5;
+input double TS_ATR_Multiplier = 1.0;
+
+input int EMA_Fast             = 20;
+input int EMA_Slow             = 50;
+input int RSI_Period           = 14;
+
+input ulong MagicNumber        = 810001;
+input int SlippagePoints       = 20;
+
+//====================== GLOBAL ======================
+
+int atrHandle  = INVALID_HANDLE;
+int fastHandle = INVALID_HANDLE;
+int slowHandle = INVALID_HANDLE;
+int rsiHandle  = INVALID_HANDLE;
+
+datetime lastBarTime = 0;
+
+//====================== INITIALIZATION ======================
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetTypeFillingBySymbol(_Symbol);
+
+   atrHandle = iATR(_Symbol, InpTimeframe, ATRPeriod);
+
+   fastHandle = iMA(
+      _Symbol, InpTimeframe,
+      EMA_Fast, 0, MODE_EMA, PRICE_CLOSE
+   );
+
+   slowHandle = iMA(
+      _Symbol, InpTimeframe,
+      EMA_Slow, 0, MODE_EMA, PRICE_CLOSE
+   );
+
+   rsiHandle = iRSI(
+      _Symbol, InpTimeframe,
+      RSI_Period, PRICE_CLOSE
+   );
+
+   if(atrHandle == INVALID_HANDLE ||
+      fastHandle == INVALID_HANDLE ||
+      slowHandle == INVALID_HANDLE ||
+      rsiHandle == INVALID_HANDLE)
+   {
+      Print("ERROR: Gagal membuat indikator");
+      return INIT_FAILED;
+   }
+
+   Print("================================");
+   Print("HYBRID SCALPING V1 AKTIF");
+   Print("MODE: FORCED ENTRY");
+   Print("TIMEFRAME: M1");
+   Print("RISK: 0.5%");
+   Print("MAX POSITION: 3");
+   Print("================================");
+
+   return INIT_SUCCEEDED;
+}
+
+//====================== DEINITIALIZATION ======================
+
+void OnDeinit(const int reason)
+{
+   if(atrHandle != INVALID_HANDLE)
+      IndicatorRelease(atrHandle);
+
+   if(fastHandle != INVALID_HANDLE)
+      IndicatorRelease(fastHandle);
+
+   if(slowHandle != INVALID_HANDLE)
+      IndicatorRelease(slowHandle);
+
+   if(rsiHandle != INVALID_HANDLE)
+      IndicatorRelease(rsiHandle);
+}
+
+//====================== POSITION COUNT ======================
+
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      count++;
+   }
+
+   return count;
+}
+
+//====================== LOT DIGITS ======================
+
+int GetVolumeDigits(double step)
+{
+   int digits = 0;
+
+   while(digits < 8 &&
+         MathAbs(step - MathRound(step)) > 0.00000001)
+   {
+      step *= 10.0;
+      digits++;
+   }
+
+   return digits;
+}
+
+//====================== LOT CALCULATION ======================
+
+double CalculateLot(double slDistance)
+{
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   double riskMoney = balance * RiskPercent / 100.0;
+
+   double tickSize = SymbolInfoDouble(
+      _Symbol, SYMBOL_TRADE_TICK_SIZE
+   );
+
+   double tickValue = SymbolInfoDouble(
+      _Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS
+   );
+
+   if(tickValue <= 0)
+      tickValue = SymbolInfoDouble(
+         _Symbol, SYMBOL_TRADE_TICK_VALUE
+      );
+
+   if(tickSize <= 0 ||
+      tickValue <= 0 ||
+      slDistance <= 0)
+      return 0;
+
+   double lossPerLot =
+      (slDistance / tickSize) * tickValue;
+
+   if(lossPerLot <= 0)
+      return 0;
+
+   double lot = riskMoney / lossPerLot;
+
+   double minLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MIN
+   );
+
+   double maxLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MAX
+   );
+
+   double stepLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_STEP
+   );
+
+   if(stepLot <= 0)
+      return 0;
+
+   lot = MathFloor(lot / stepLot) * stepLot;
+
+   lot = MathMin(lot, maxLot);
+
+   if(lot < minLot)
+   {
+      Print("LOT TOO SMALL - RISK LIMIT");
+      return 0;
+   }
+
+   return NormalizeDouble(
+      lot, GetVolumeDigits(stepLot)
+   );
+}
+
+//====================== NEW CANDLE ======================
+
+bool IsNewBar()
+{
+   datetime current = iTime(
+      _Symbol, InpTimeframe, 0
+   );
+
+   if(current == 0)
+      return false;
+
+   if(current != lastBarTime)
+   {
+      lastBarTime = current;
+      return true;
+   }
+
+   return false;
+}
+
+//====================== INDICATOR DATA ======================
+
+bool GetIndicatorData(
+   double &atr,
+   double &emaFast,
+   double &emaSlow,
+   double &rsi
+)
+{
+   double a[];
+   double f[];
+   double s[];
+   double r[];
+
+   ArraySetAsSeries(a, true);
+   ArraySetAsSeries(f, true);
+   ArraySetAsSeries(s, true);
+   ArraySetAsSeries(r, true);
+
+   if(CopyBuffer(atrHandle, 0, 0, 3, a) < 3)
+      return false;
+
+   if(CopyBuffer(fastHandle, 0, 0, 3, f) < 3)
+      return false;
+
+   if(CopyBuffer(slowHandle, 0, 0, 3, s) < 3)
+      return false;
+
+   if(CopyBuffer(rsiHandle, 0, 0, 3, r) < 3)
+      return false;
+
+   // Gunakan data candle terakhir yang sudah selesai
+   atr     = a[1];
+   emaFast = f[1];
+   emaSlow = s[1];
+   rsi     = r[1];
+
+   return atr > 0;
+}
+
+//====================== HYBRID FORCED SIGNAL ======================
+
+int GetSignal(
+   double emaFast,
+   double emaSlow,
+   double rsi
+)
+{
+   double open1 = iOpen(
+      _Symbol, InpTimeframe, 1
+   );
+
+   double close1 = iClose(
+      _Symbol, InpTimeframe, 1
+   );
+
+   double high2 = iHigh(
+      _Symbol, InpTimeframe, 2
+   );
+
+   double low2 = iLow(
+      _Symbol, InpTimeframe, 2
+   );
+
+   int buyScore = 0;
+   int sellScore = 0;
+
+   // TREND
+   if(emaFast > emaSlow)
+      buyScore++;
+
+   if(emaFast < emaSlow)
+      sellScore++;
+
+   // MOMENTUM
+   if(rsi >= 50)
+      buyScore++;
+
+   if(rsi < 50)
+      sellScore++;
+
+   // PRICE ACTION
+   if(close1 > open1)
+      buyScore++;
+
+   if(close1 < open1)
+      sellScore++;
+
+   // BREAKOUT
+   if(close1 > high2)
+      buyScore++;
+
+   if(close1 < low2)
+      sellScore++;
+
+   // ARAH BERDASARKAN SKOR
+   if(buyScore > sellScore)
+      return 1;
+
+   if(sellScore > buyScore)
+      return -1;
+
+   // JIKA SERI, IKUT ARAH EMA
+   if(emaFast >= emaSlow)
+      return 1;
+
+   return -1;
+}
+
+//====================== OPEN POSITION ======================
+
+void OpenPosition(int signal, double atr)
+{
+   double ask = SymbolInfoDouble(
+      _Symbol, SYMBOL_ASK
+   );
+
+   double bid = SymbolInfoDouble(
+      _Symbol, SYMBOL_BID
+   );
+
+   if(ask <= 0 || bid <= 0)
+      return;
+
+   double slDistance =
+      atr * SL_ATR_Multiplier;
+
+   double tpDistance =
+      atr * TP_ATR_Multiplier;
+
+   // BROKER MINIMUM STOP DISTANCE
+   double minStop =
+      (double)SymbolInfoInteger(
+         _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+      ) * _Point;
+
+   slDistance = MathMax(
+      slDistance, minStop
+   );
+
+   tpDistance = MathMax(
+      tpDistance, minStop
+   );
+
+   double lot = CalculateLot(slDistance);
+
+   if(lot <= 0)
+      return;
+
+   int digits = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_DIGITS
+   );
+
+   bool result = false;
+
+   // BUY
+   if(signal == 1)
+   {
+      double sl = NormalizeDouble(
+         ask - slDistance, digits
+      );
+
+      double tp = NormalizeDouble(
+         ask + tpDistance, digits
+      );
+
+      result = trade.Buy(
+         lot,
+         _Symbol,
+         0,
+         sl,
+         tp,
+         "HYBRID V1 BUY"
+      );
+   }
+
+   // SELL
+   else if(signal == -1)
+   {
+      double sl = NormalizeDouble(
+         bid + slDistance, digits
+      );
+
+      double tp = NormalizeDouble(
+         bid - tpDistance, digits
+      );
+
+      result = trade.Sell(
+         lot,
+         _Symbol,
+         0,
+         sl,
+         tp,
+         "HYBRID V1 SELL"
+      );
+   }
+
+   if(result &&
+      (trade.ResultRetcode() == TRADE_RETCODE_DONE ||
+       trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL ||
+       trade.ResultRetcode() == TRADE_RETCODE_PLACED))
+   {
+      Print(
+         "☑️ ENTRY BERHASIL | ",
+         signal == 1 ? "BUY" : "SELL",
+         " | LOT: ", lot,
+         " | ATR: ", atr,
+         " | SL: ", slDistance,
+         " | TP: ", tpDistance
+      );
+   }
+   else
+   {
+      Print(
+         "❌ ENTRY GAGAL | ",
+         trade.ResultRetcode(),
+         " | ",
+         trade.ResultRetcodeDescription()
+      );
+   }
+}
+
+//====================== TRAILING STOP ======================
+
+void ManageTrailingStop()
+{
+   double atrBuffer[];
+
+   ArraySetAsSeries(atrBuffer, true);
+
+   if(CopyBuffer(
+      atrHandle, 0, 0, 2, atrBuffer
+   ) < 2)
+      return;
+
+   double atr = atrBuffer[0];
+
+   if(atr <= 0)
+      return;
+
+   double trailingDistance =
+      atr * TS_ATR_Multiplier;
+
+   double bid = SymbolInfoDouble(
+      _Symbol, SYMBOL_BID
+   );
+
+   double ask = SymbolInfoDouble(
+      _Symbol, SYMBOL_ASK
+   );
+
+   double minStop =
+      (double)SymbolInfoInteger(
+         _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+      ) * _Point;
+
+   double minFreeze =
+      (double)SymbolInfoInteger(
+         _Symbol, SYMBOL_TRADE_FREEZE_LEVEL
+      ) * _Point;
+
+   double minDistance = MathMax(
+      minStop, minFreeze
+   );
+
+   int digits = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_DIGITS
+   );
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      long type = PositionGetInteger(
+         POSITION_TYPE
+      );
+
+      double openPrice = PositionGetDouble(
+         POSITION_PRICE_OPEN
+      );
+
+      double oldSL = PositionGetDouble(
+         POSITION_SL
+      );
+
+      double tp = PositionGetDouble(
+         POSITION_TP
+      );
+
+      // BUY TRAILING
+      if(type == POSITION_TYPE_BUY)
+      {
+         // Trailing aktif setelah profit minimal 1 ATR
+         if(bid - openPrice < trailingDistance)
+            continue;
+
+         double newSL = NormalizeDouble(
+            bid - trailingDistance,
+            digits
+         );
+
+         if(bid - newSL < minDistance)
+            continue;
+
+         // SL hanya boleh naik
+         if((oldSL == 0 || newSL > oldSL) &&
+            newSL < bid)
+         {
+            if(!trade.PositionModify(
+               ticket, newSL, tp
+            ))
+            {
+               Print(
+                  "❌ TRAILING BUY ERROR: ",
+                  trade.ResultRetcodeDescription()
+               );
+            }
+         }
+      }
+
+      // SELL TRAILING
+      else if(type == POSITION_TYPE_SELL)
+      {
+         // Trailing aktif setelah profit minimal 1 ATR
+         if(openPrice - ask < trailingDistance)
+            continue;
+
+         double newSL = NormalizeDouble(
+            ask + trailingDistance,
+            digits
+         );
+
+         if(newSL - ask < minDistance)
+            continue;
+
+         // SL hanya boleh turun
+         if((oldSL == 0 || newSL < oldSL) &&
+            newSL > ask)
+         {
+            if(!trade.PositionModify(
+               ticket, newSL, tp
+            ))
+            {
+               Print(
+                  "❌ TRAILING SELL ERROR: ",
+                  trade.ResultRetcodeDescription()
+               );
+            }
+         }
+      }
+   }
+}
+
+//====================== MAIN TICK ======================
+
+void OnTick()
+{
+   // TRAILING SETIAP TICK
+   ManageTrailingStop();
+
+   // ENTRY SETIAP CANDLE BARU
+   if(!IsNewBar())
+      return;
+
+   // SPREAD FILTER
+   double spread =
+      (SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+       SymbolInfoDouble(_Symbol, SYMBOL_BID))
+      / _Point;
+
+   if(spread > MaxSpreadPoints)
+   {
+      Print(
+         "⛔ SPREAD TERLALU TINGGI: ",
+         spread
+      );
+
+      return;
+   }
+
+   // MAXIMUM POSITION
+   int positions = CountPositions();
+
+   if(positions >= MaxPositions)
+   {
+      Print(
+         "⏳ MAX POSITION: ",
+         positions, "/", MaxPositions
+      );
+
+      return;
+   }
+
+   // GET INDICATOR
+   double atr;
+   double emaFast;
+   double emaSlow;
+   double rsi;
+
+   if(!GetIndicatorData(
+      atr, emaFast, emaSlow, rsi
+   ))
+   {
+      Print("⏳ Menunggu data indikator");
+      return;
+   }
+
+   // FORCED SIGNAL
+   int signal = GetSignal(
+      emaFast, emaSlow, rsi
+   );
+
+   // ENTRY BUY / SELL
+   if(signal == 1)
+   {
+      Print("📈 HYBRID SIGNAL: BUY");
+      OpenPosition(1, atr);
+   }
+   else
+   {
+      Print("📉 HYBRID SIGNAL: SELL");
+      OpenPosition(-1, atr);
+   }
+}
+
+//+------------------------------------------------------------------+
+//|                    END HYBRID SCALPING V1                        |
+//+------------------------------------------------------------------+
