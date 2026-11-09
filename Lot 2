@@ -1,0 +1,587 @@
+//+------------------------------------------------------------------+
+//|              FOREX VOLATILITY TREND V2                           |
+//|              MT5 EXPERT ADVISOR                                  |
+//|              M1 VOLATILITY TREND TRADING                         |
+//+------------------------------------------------------------------+
+#property strict
+#property version "2.00"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//==================== LOT MODE ====================
+
+enum LOT_MODE
+{
+   FIXED_LOT = 0,
+   AUTO_RISK = 1
+};
+
+//==================== INPUT SETTINGS ====================
+
+input group "=== GENERAL SETTINGS ==="
+
+input ENUM_TIMEFRAMES SignalTF = PERIOD_M1;
+input ulong MagicNumber = 20261109;
+input int MaxPositions = 3;
+input int CooldownBars = 3;
+input int MaxSpreadPoints = 80;
+
+input group "=== LOT SETTINGS ==="
+
+input LOT_MODE LotMode = FIXED_LOT;
+input double FixedLot = 0.01;
+input double RiskPercent = 0.5;
+
+input group "=== TREND SETTINGS ==="
+
+input int FastEMA = 9;
+input int MediumEMA = 21;
+input int TrendEMA = 50;
+
+input group "=== SIDEWAYS FILTER ==="
+
+input int ADXPeriod = 14;
+input double MinADX = 22.0;
+input double MinEMAGapATR = 0.15;
+
+input group "=== VOLATILITY SETTINGS ==="
+
+input int ATRPeriod = 14;
+input int ATRAveragePeriod = 20;
+input double MinVolatilityRatio = 0.85;
+input double MinBodyATR = 0.20;
+
+input group "=== SL TP SETTINGS ==="
+
+input double SL_ATR = 1.2;
+input double TP_ATR = 1.5;
+
+input group "=== TRAILING STOP ==="
+
+input bool EnableTrailing = true;
+input double TrailingATR = 1.0;
+
+input group "=== NOTIFICATION ==="
+
+input bool EnableAlert = true;
+input bool EnablePushNotification = false;
+
+//==================== GLOBAL ====================
+
+int hFastEMA;
+int hMediumEMA;
+int hTrendEMA;
+int hADX;
+int hATR;
+
+datetime lastBarTime = 0;
+datetime lastSignalTime = 0;
+
+//==================== INITIALIZATION ====================
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(20);
+
+   hFastEMA = iMA(_Symbol, SignalTF, FastEMA, 0,
+                  MODE_EMA, PRICE_CLOSE);
+
+   hMediumEMA = iMA(_Symbol, SignalTF, MediumEMA, 0,
+                    MODE_EMA, PRICE_CLOSE);
+
+   hTrendEMA = iMA(_Symbol, SignalTF, TrendEMA, 0,
+                   MODE_EMA, PRICE_CLOSE);
+
+   hADX = iADX(_Symbol, SignalTF, ADXPeriod);
+
+   hATR = iATR(_Symbol, SignalTF, ATRPeriod);
+
+   if(hFastEMA == INVALID_HANDLE ||
+      hMediumEMA == INVALID_HANDLE ||
+      hTrendEMA == INVALID_HANDLE ||
+      hADX == INVALID_HANDLE ||
+      hATR == INVALID_HANDLE)
+   {
+      Print("ERROR: Indicator initialization failed");
+      return INIT_FAILED;
+   }
+
+   Print("FOREX VOLATILITY TREND V2 STARTED");
+
+   return INIT_SUCCEEDED;
+}
+
+//==================== DEINITIALIZATION ====================
+
+void OnDeinit(const int reason)
+{
+   IndicatorRelease(hFastEMA);
+   IndicatorRelease(hMediumEMA);
+   IndicatorRelease(hTrendEMA);
+   IndicatorRelease(hADX);
+   IndicatorRelease(hATR);
+
+   Comment("");
+}
+
+//==================== NEW CANDLE ====================
+
+bool IsNewBar()
+{
+   datetime currentTime = iTime(_Symbol, SignalTF, 0);
+
+   if(currentTime == 0)
+      return false;
+
+   if(currentTime != lastBarTime)
+   {
+      lastBarTime = currentTime;
+      return true;
+   }
+
+   return false;
+}
+
+//==================== LOT NORMALIZATION ====================
+
+double NormalizeLot(double lot)
+{
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(step <= 0)
+      return 0;
+
+   lot = MathMax(minLot, MathMin(maxLot, lot));
+
+   lot = MathFloor(lot / step + 0.00000001) * step;
+
+   int digits = 0;
+   double temp = step;
+
+   while(digits < 8 &&
+         MathAbs(temp - MathRound(temp)) > 0.00000001)
+   {
+      temp *= 10;
+      digits++;
+   }
+
+   return NormalizeDouble(lot, digits);
+}
+
+//==================== LOT CALCULATION ====================
+
+double CalculateLot(double stopDistance)
+{
+   if(LotMode == FIXED_LOT)
+      return NormalizeLot(FixedLot);
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   double riskMoney = balance * RiskPercent / 100.0;
+
+   double tickValue = SymbolInfoDouble(
+      _Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS
+   );
+
+   double tickSize = SymbolInfoDouble(
+      _Symbol, SYMBOL_TRADE_TICK_SIZE
+   );
+
+   if(tickValue <= 0)
+      tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+
+   if(tickValue <= 0 || tickSize <= 0 || stopDistance <= 0)
+      return 0;
+
+   double lossPerLot = (stopDistance / tickSize) * tickValue;
+
+   if(lossPerLot <= 0)
+      return 0;
+
+   double lot = riskMoney / lossPerLot;
+
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   // Jangan memaksakan lot minimum jika melebihi batas risiko.
+   if(lot < minLot)
+      return 0;
+
+   return NormalizeLot(lot);
+}
+
+//==================== POSITION COUNT ====================
+
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == (long)MagicNumber)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//==================== TRAILING STOP ====================
+
+void ManageTrailing()
+{
+   if(!EnableTrailing)
+      return;
+
+   double atr[1];
+
+   if(CopyBuffer(hATR, 0, 1, 1, atr) < 1)
+      return;
+
+   if(atr[0] <= 0)
+      return;
+
+   double distance = atr[0] * TrailingATR;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   int stopsLevel = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minDistance = stopsLevel * point;
+
+   distance = MathMax(distance, minDistance);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double oldTP = PositionGetDouble(POSITION_TP);
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         double newSL = NormalizeDouble(bid - distance, _Digits);
+
+         if(bid - openPrice > distance &&
+            (oldSL == 0 || newSL > oldSL + point))
+         {
+            if(!trade.PositionModify(ticket, newSL, oldTP))
+               Print("BUY trailing failed: ", trade.ResultRetcodeDescription());
+         }
+      }
+
+      if(type == POSITION_TYPE_SELL)
+      {
+         double newSL = NormalizeDouble(ask + distance, _Digits);
+
+         if(openPrice - ask > distance &&
+            (oldSL == 0 || newSL < oldSL - point))
+         {
+            if(!trade.PositionModify(ticket, newSL, oldTP))
+               Print("SELL trailing failed: ", trade.ResultRetcodeDescription());
+         }
+      }
+   }
+}
+
+//==================== SIGNAL NOTIFICATION ====================
+
+void NotifySignal(string signal, double price)
+{
+   string message =
+      "FOREX VOLATILITY TREND V2\n" +
+      _Symbol + "\n" +
+      "TIMEFRAME: M1\n" +
+      "SIGNAL: " + signal + "\n" +
+      "PRICE: " + DoubleToString(price, _Digits);
+
+   Print(message);
+
+   if(EnableAlert)
+      Alert(message);
+
+   if(EnablePushNotification)
+      SendNotification(message);
+}
+
+//==================== OPEN TRADE ====================
+
+bool OpenTrade(string signal, double atr)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double entry = signal == "BUY" ? ask : bid;
+
+   double slDistance = atr * SL_ATR;
+   double tpDistance = atr * TP_ATR;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   int stopsLevel = (int)SymbolInfoInteger(
+      _Symbol, SYMBOL_TRADE_STOPS_LEVEL
+   );
+
+   double minDistance = stopsLevel * point;
+
+   slDistance = MathMax(slDistance, minDistance + point);
+   tpDistance = MathMax(tpDistance, minDistance + point);
+
+   double lot = CalculateLot(slDistance);
+
+   if(lot <= 0)
+   {
+      Print("TRADE CANCELLED: Lot invalid or risk too small");
+      return false;
+   }
+
+   double sl;
+   double tp;
+
+   bool result = false;
+
+   if(signal == "BUY")
+   {
+      sl = NormalizeDouble(entry - slDistance, _Digits);
+      tp = NormalizeDouble(entry + tpDistance, _Digits);
+
+      result = trade.Buy(
+         lot, _Symbol, 0, sl, tp,
+         "FOREX VOLATILITY BUY"
+      );
+   }
+   else
+   {
+      sl = NormalizeDouble(entry + slDistance, _Digits);
+      tp = NormalizeDouble(entry - tpDistance, _Digits);
+
+      result = trade.Sell(
+         lot, _Symbol, 0, sl, tp,
+         "FOREX VOLATILITY SELL"
+      );
+   }
+
+   if(result && trade.ResultRetcode() == TRADE_RETCODE_DONE ||
+      trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL)
+   {
+      lastSignalTime = iTime(_Symbol, SignalTF, 1);
+
+      NotifySignal(signal, entry);
+
+      Print("TRADE OPENED | ",
+            signal,
+            " | LOT: ", lot,
+            " | SL: ", sl,
+            " | TP: ", tp);
+
+      return true;
+   }
+
+   Print("TRADE FAILED: ",
+         trade.ResultRetcode(),
+         " | ",
+         trade.ResultRetcodeDescription());
+
+   return false;
+}
+
+//==================== MAIN LOGIC ====================
+
+void OnTick()
+{
+   ManageTrailing();
+
+   if(!IsNewBar())
+      return;
+
+   if(Bars(_Symbol, SignalTF) <
+      ATRAveragePeriod + TrendEMA + 10)
+      return;
+
+   //==================== SPREAD FILTER ====================
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   if(point <= 0)
+      return;
+
+   double spread = (ask - bid) / point;
+
+   if(spread > MaxSpreadPoints)
+   {
+      Print("SIGNAL BLOCKED: Spread too high");
+      return;
+   }
+
+   //==================== POSITION LIMIT ====================
+
+   if(CountPositions() >= MaxPositions)
+      return;
+
+   //==================== COOLDOWN ====================
+
+   if(lastSignalTime != 0)
+   {
+      int barsPassed = iBarShift(
+         _Symbol, SignalTF, lastSignalTime, false
+      );
+
+      if(barsPassed >= 0 && barsPassed < CooldownBars)
+         return;
+   }
+
+   //==================== PRICE DATA ====================
+
+   MqlRates candle[];
+
+   ArraySetAsSeries(candle, true);
+
+   if(CopyRates(_Symbol, SignalTF, 1, 1, candle) < 1)
+      return;
+
+   //==================== EMA DATA ====================
+
+   double fast[1], medium[1], trend[1], trendOld[1];
+
+   if(CopyBuffer(hFastEMA, 0, 1, 1, fast) < 1) return;
+   if(CopyBuffer(hMediumEMA, 0, 1, 1, medium) < 1) return;
+   if(CopyBuffer(hTrendEMA, 0, 1, 1, trend) < 1) return;
+   if(CopyBuffer(hTrendEMA, 0, 4, 1, trendOld) < 1) return;
+
+   //==================== ADX DATA ====================
+
+   double adx[1], plusDI[1], minusDI[1];
+
+   if(CopyBuffer(hADX, 0, 1, 1, adx) < 1) return;
+   if(CopyBuffer(hADX, 1, 1, 1, plusDI) < 1) return;
+   if(CopyBuffer(hADX, 2, 1, 1, minusDI) < 1) return;
+
+   //==================== ATR DATA ====================
+
+   double atr[1];
+
+   if(CopyBuffer(hATR, 0, 1, 1, atr) < 1)
+      return;
+
+   if(atr[0] <= 0)
+      return;
+
+   double atrValues[];
+
+   ArraySetAsSeries(atrValues, true);
+
+   if(CopyBuffer(hATR, 0, 2, ATRAveragePeriod, atrValues)
+      < ATRAveragePeriod)
+      return;
+
+   double atrAverage = 0;
+
+   for(int i = 0; i < ATRAveragePeriod; i++)
+      atrAverage += atrValues[i];
+
+   atrAverage /= ATRAveragePeriod;
+
+   if(atrAverage <= 0)
+      return;
+
+   //==================== SIDEWAYS FILTER ====================
+
+   bool strongADX = adx[0] >= MinADX;
+
+   bool enoughVolatility =
+      atr[0] >= atrAverage * MinVolatilityRatio;
+
+   bool enoughEMAGap =
+      MathAbs(fast[0] - trend[0]) >=
+      atr[0] * MinEMAGapATR;
+
+   //==================== CANDLE FILTER ====================
+
+   double body = MathAbs(
+      candle[0].close - candle[0].open
+   );
+
+   bool enoughBody = body >= atr[0] * MinBodyATR;
+
+   bool bullishCandle =
+      candle[0].close > candle[0].open;
+
+   bool bearishCandle =
+      candle[0].close < candle[0].open;
+
+   //==================== TREND DIRECTION ====================
+
+   bool bullishTrend =
+      fast[0] > medium[0] &&
+      medium[0] > trend[0] &&
+      trend[0] > trendOld[0] &&
+      plusDI[0] > minusDI[0];
+
+   bool bearishTrend =
+      fast[0] < medium[0] &&
+      medium[0] < trend[0] &&
+      trend[0] < trendOld[0] &&
+      minusDI[0] > plusDI[0];
+
+   //==================== FINAL FILTER ====================
+
+   if(!strongADX ||
+      !enoughVolatility ||
+      !enoughEMAGap ||
+      !enoughBody)
+      return;
+
+   //==================== BUY ====================
+
+   if(bullishTrend &&
+      bullishCandle &&
+      candle[0].close > fast[0])
+   {
+      OpenTrade("BUY", atr[0]);
+      return;
+   }
+
+   //==================== SELL ====================
+
+   if(bearishTrend &&
+      bearishCandle &&
+      candle[0].close < fast[0])
+   {
+      OpenTrade("SELL", atr[0]);
+      return;
+   }
+}
+
+//+------------------------------------------------------------------+
+//|                    END OF EXPERT ADVISOR                         |
+//+------------------------------------------------------------------+
