@@ -1,0 +1,496 @@
+//+------------------------------------------------------------------+
+//|              HYBRID TREND RANGE EA                               |
+//|              MT5 EXPERT ADVISOR                                  |
+//+------------------------------------------------------------------+
+#property strict
+#property version "2.00"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+//==================== GENERAL ====================
+
+input group "=== GENERAL ==="
+input double RiskPercent = 1.0;
+input double FixedLot = 0.01;
+input bool UseRiskPercent = true;
+input int MagicNumber = 20261109;
+input int MaxPositions = 1;
+
+//==================== TIMEFRAME ====================
+
+input group "=== TIMEFRAME ==="
+input ENUM_TIMEFRAMES SignalTF = PERIOD_M15;
+
+//==================== TREND ====================
+
+input group "=== TREND SETTINGS ==="
+input int FastEMA = 50;
+input int SlowEMA = 200;
+input int ADXPeriod = 14;
+input double ADXTrend = 25.0;
+
+//==================== RANGE ====================
+
+input group "=== RANGE SETTINGS ==="
+input double ADXRange = 20.0;
+input int RSIPeriod = 14;
+input double RSI_Buy = 35.0;
+input double RSI_Sell = 65.0;
+input int BBPeriod = 20;
+input double BBDeviation = 2.0;
+
+//==================== RISK ====================
+
+input group "=== RISK MANAGEMENT ==="
+input int ATRPeriod = 14;
+input double SL_ATR = 1.5;
+input double TP_ATR = 2.25;
+input bool UseTrailing = true;
+input double TrailATR = 1.0;
+
+//==================== EXECUTION ====================
+
+input group "=== EXECUTION ==="
+input int MaxSpreadPoints = 80;
+input int SlippagePoints = 20;
+
+//==================== INDICATORS ====================
+
+int hFastEMA;
+int hSlowEMA;
+int hADX;
+int hRSI;
+int hBB;
+int hATR;
+
+datetime lastBar = 0;
+
+//==================== INIT ====================
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetTypeFillingBySymbol(_Symbol);
+
+   hFastEMA = iMA(_Symbol, SignalTF, FastEMA, 0,
+                  MODE_EMA, PRICE_CLOSE);
+
+   hSlowEMA = iMA(_Symbol, SignalTF, SlowEMA, 0,
+                  MODE_EMA, PRICE_CLOSE);
+
+   hADX = iADX(_Symbol, SignalTF, ADXPeriod);
+
+   hRSI = iRSI(_Symbol, SignalTF, RSIPeriod,
+               PRICE_CLOSE);
+
+   hBB = iBands(_Symbol, SignalTF, BBPeriod,
+                0, BBDeviation, PRICE_CLOSE);
+
+   hATR = iATR(_Symbol, SignalTF, ATRPeriod);
+
+   if(hFastEMA == INVALID_HANDLE ||
+      hSlowEMA == INVALID_HANDLE ||
+      hADX == INVALID_HANDLE ||
+      hRSI == INVALID_HANDLE ||
+      hBB == INVALID_HANDLE ||
+      hATR == INVALID_HANDLE)
+   {
+      Print("Indicator initialization failed");
+      return INIT_FAILED;
+   }
+
+   Print("HYBRID TREND RANGE EA READY");
+
+   return INIT_SUCCEEDED;
+}
+
+//==================== DEINIT ====================
+
+void OnDeinit(const int reason)
+{
+   IndicatorRelease(hFastEMA);
+   IndicatorRelease(hSlowEMA);
+   IndicatorRelease(hADX);
+   IndicatorRelease(hRSI);
+   IndicatorRelease(hBB);
+   IndicatorRelease(hATR);
+
+   Comment("");
+}
+
+//==================== GET BUFFER ====================
+
+double GetBuffer(int handle, int buffer, int shift)
+{
+   double data[];
+
+   ArraySetAsSeries(data, true);
+
+   if(CopyBuffer(handle, buffer, shift, 1, data) != 1)
+      return EMPTY_VALUE;
+
+   return data[0];
+}
+
+//==================== CALCULATE LOT ====================
+
+double CalculateLot(double slDistance)
+{
+   double lot = FixedLot;
+
+   if(UseRiskPercent)
+   {
+      double balance =
+         AccountInfoDouble(ACCOUNT_BALANCE);
+
+      double riskMoney =
+         balance * RiskPercent / 100.0;
+
+      double tickValue =
+         SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+
+      double tickSize =
+         SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+      if(tickValue <= 0 || tickSize <= 0)
+         return 0;
+
+      double lossPerLot =
+         (slDistance / tickSize) * tickValue;
+
+      if(lossPerLot <= 0)
+         return 0;
+
+      lot = riskMoney / lossPerLot;
+   }
+
+   double minLot =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   double maxLot =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   double step =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(step <= 0 || lot < minLot)
+      return 0;
+
+   lot = MathMin(lot, maxLot);
+   lot = MathFloor(lot / step) * step;
+
+   int digits = 2;
+
+   if(step >= 1.0)
+      digits = 0;
+   else if(step >= 0.1)
+      digits = 1;
+   else if(step >= 0.01)
+      digits = 2;
+   else
+      digits = 3;
+
+   return NormalizeDouble(lot, digits);
+}
+
+//==================== COUNT POSITIONS ====================
+
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//==================== TRAILING STOP ====================
+
+void ManageTrailing()
+{
+   if(!UseTrailing)
+      return;
+
+   double atr = GetBuffer(hATR, 0, 1);
+
+   if(atr == EMPTY_VALUE || atr <= 0)
+      return;
+
+   double distance = atr * TrailATR;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   int stopLevel =
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+   double minDistance = stopLevel * point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         double newSL =
+            NormalizeDouble(bid - distance, _Digits);
+
+         if(bid - newSL < minDistance)
+            continue;
+
+         if((oldSL == 0 || newSL > oldSL + point) &&
+            newSL < bid)
+         {
+            trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+
+      else if(type == POSITION_TYPE_SELL)
+      {
+         double newSL =
+            NormalizeDouble(ask + distance, _Digits);
+
+         if(newSL - ask < minDistance)
+            continue;
+
+         if((oldSL == 0 || newSL < oldSL - point) &&
+            newSL > ask)
+         {
+            trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+   }
+}
+
+//==================== MAIN LOGIC ====================
+
+void OnTick()
+{
+   ManageTrailing();
+
+   datetime barTime = iTime(_Symbol, SignalTF, 0);
+
+   if(barTime == 0 || barTime == lastBar)
+      return;
+
+   lastBar = barTime;
+
+   if(Bars(_Symbol, SignalTF) < SlowEMA + 20)
+      return;
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double spread = (ask - bid) / _Point;
+
+   if(spread > MaxSpreadPoints)
+      return;
+
+   if(CountPositions() >= MaxPositions)
+      return;
+
+   // INDICATOR DATA
+
+   double fastEMA = GetBuffer(hFastEMA, 0, 1);
+   double slowEMA = GetBuffer(hSlowEMA, 0, 1);
+
+   double adx = GetBuffer(hADX, 0, 1);
+   double plusDI = GetBuffer(hADX, 1, 1);
+   double minusDI = GetBuffer(hADX, 2, 1);
+
+   double rsi = GetBuffer(hRSI, 0, 1);
+
+   double upperBB = GetBuffer(hBB, 1, 1);
+   double lowerBB = GetBuffer(hBB, 2, 1);
+
+   double atr = GetBuffer(hATR, 0, 1);
+
+   if(fastEMA == EMPTY_VALUE ||
+      slowEMA == EMPTY_VALUE ||
+      adx == EMPTY_VALUE ||
+      plusDI == EMPTY_VALUE ||
+      minusDI == EMPTY_VALUE ||
+      rsi == EMPTY_VALUE ||
+      upperBB == EMPTY_VALUE ||
+      lowerBB == EMPTY_VALUE ||
+      atr == EMPTY_VALUE || atr <= 0)
+      return;
+
+   double close = iClose(_Symbol, SignalTF, 1);
+   double open = iOpen(_Symbol, SignalTF, 1);
+
+   bool bullish = close > open;
+   bool bearish = close < open;
+
+   bool buySignal = false;
+   bool sellSignal = false;
+
+   string mode = "NO TRADE";
+
+   //================ TREND FOLLOWING ================
+
+   if(adx >= ADXTrend)
+   {
+      mode = "TREND FOLLOWING";
+
+      // BUY TREND
+
+      if(fastEMA > slowEMA &&
+         plusDI > minusDI &&
+         close > fastEMA &&
+         close <= fastEMA + atr * 0.5 &&
+         rsi > 50 &&
+         bullish)
+      {
+         buySignal = true;
+      }
+
+      // SELL TREND
+
+      if(fastEMA < slowEMA &&
+         minusDI > plusDI &&
+         close < fastEMA &&
+         close >= fastEMA - atr * 0.5 &&
+         rsi < 50 &&
+         bearish)
+      {
+         sellSignal = true;
+      }
+   }
+
+   //================ SIDEWAYS RANGE ================
+
+   else if(adx <= ADXRange)
+   {
+      mode = "SIDEWAYS RANGE";
+
+      // RANGE BUY
+
+      if(close <= lowerBB &&
+         rsi <= RSI_Buy &&
+         bullish)
+      {
+         buySignal = true;
+      }
+
+      // RANGE SELL
+
+      if(close >= upperBB &&
+         rsi >= RSI_Sell &&
+         bearish)
+      {
+         sellSignal = true;
+      }
+   }
+
+   //================ DASHBOARD ====================
+
+   Comment(
+      "HYBRID TREND RANGE EA\n",
+      "Symbol: ", _Symbol, "\n",
+      "Timeframe: ", EnumToString(SignalTF), "\n",
+      "Market: ", mode, "\n",
+      "ADX: ", DoubleToString(adx, 2), "\n",
+      "RSI: ", DoubleToString(rsi, 2), "\n",
+      "Spread: ", DoubleToString(spread, 1), "\n",
+      "Positions: ", CountPositions()
+   );
+
+   if(!buySignal && !sellSignal)
+      return;
+
+   //================ RISK CALCULATION ================
+
+   double slDistance = atr * SL_ATR;
+   double tpDistance = atr * TP_ATR;
+
+   double minStop =
+      (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL)
+      * _Point;
+
+   slDistance = MathMax(slDistance, minStop + 2 * _Point);
+   tpDistance = MathMax(tpDistance, minStop + 2 * _Point);
+
+   double lot = CalculateLot(slDistance);
+
+   if(lot <= 0)
+   {
+      Print("LOT INVALID: Check risk and broker minimum lot");
+      return;
+   }
+
+   //================ EXECUTION ====================
+
+   bool result = false;
+
+   if(buySignal)
+   {
+      double sl = NormalizeDouble(ask - slDistance, _Digits);
+      double tp = NormalizeDouble(ask + tpDistance, _Digits);
+
+      result = trade.Buy(
+         lot, _Symbol, 0, sl, tp, "HYBRID BUY"
+      );
+   }
+
+   else if(sellSignal)
+   {
+      double sl = NormalizeDouble(bid + slDistance, _Digits);
+      double tp = NormalizeDouble(bid - tpDistance, _Digits);
+
+      result = trade.Sell(
+         lot, _Symbol, 0, sl, tp, "HYBRID SELL"
+      );
+   }
+
+   if(!result)
+   {
+      Print(
+         "ORDER FAILED: ",
+         trade.ResultRetcode(),
+         " | ",
+         trade.ResultRetcodeDescription()
+      );
+   }
+   else
+   {
+      Print(
+         "ORDER SUCCESS: ",
+         buySignal ? "BUY" : "SELL",
+         " | LOT: ", lot,
+         " | MODE: ", mode
+      );
+   }
+}
+
+//+------------------------------------------------------------------+
