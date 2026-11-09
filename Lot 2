@@ -33,7 +33,11 @@ input group "=== LOT SETTINGS ==="
 input LOT_MODE LotMode = FIXED_LOT;
 input double FixedLot = 0.01;
 input double RiskPercent = 0.5;
+//==================== AUTO REVERSAL ====================
 
+input group "=== AUTO REVERSAL SETTINGS ==="
+
+input bool AutoReversalEntry = false;
 input group "=== TREND SETTINGS ==="
 
 input int FastEMA = 9;
@@ -396,7 +400,12 @@ bool OpenTrade(string signal, double atr)
          "FOREX VOLATILITY SELL"
       );
    }
+//==================== AUTO REVERSAL ====================
 
+if(AutoReversalEntry)
+{
+   signal = (signal == "BUY") ? "SELL" : "BUY";
+}
    //==================== FIX RETCODE CONDITION ====================
 
    uint retcode = trade.ResultRetcode();
