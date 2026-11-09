@@ -4,7 +4,7 @@
 //|              M1 VOLATILITY TREND TRADING                         |
 //+------------------------------------------------------------------+
 #property strict
-#property version "2.00"
+#property version "2.01"
 
 #include <Trade/Trade.mqh>
 
@@ -193,7 +193,9 @@ double CalculateLot(double stopDistance)
    );
 
    if(tickValue <= 0)
-      tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      tickValue = SymbolInfoDouble(
+         _Symbol, SYMBOL_TRADE_TICK_VALUE
+      );
 
    if(tickValue <= 0 || tickSize <= 0 || stopDistance <= 0)
       return 0;
@@ -205,9 +207,10 @@ double CalculateLot(double stopDistance)
 
    double lot = riskMoney / lossPerLot;
 
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double minLot = SymbolInfoDouble(
+      _Symbol, SYMBOL_VOLUME_MIN
+   );
 
-   // Jangan memaksakan lot minimum jika melebihi batas risiko.
    if(lot < minLot)
       return 0;
 
@@ -287,25 +290,31 @@ void ManageTrailing()
 
       if(type == POSITION_TYPE_BUY)
       {
-         double newSL = NormalizeDouble(bid - distance, _Digits);
+         double newSL = NormalizeDouble(
+            bid - distance, _Digits
+         );
 
          if(bid - openPrice > distance &&
             (oldSL == 0 || newSL > oldSL + point))
          {
             if(!trade.PositionModify(ticket, newSL, oldTP))
-               Print("BUY trailing failed: ", trade.ResultRetcodeDescription());
+               Print("BUY trailing failed: ",
+                     trade.ResultRetcodeDescription());
          }
       }
 
       if(type == POSITION_TYPE_SELL)
       {
-         double newSL = NormalizeDouble(ask + distance, _Digits);
+         double newSL = NormalizeDouble(
+            ask + distance, _Digits
+         );
 
          if(openPrice - ask > distance &&
             (oldSL == 0 || newSL < oldSL - point))
          {
             if(!trade.PositionModify(ticket, newSL, oldTP))
-               Print("SELL trailing failed: ", trade.ResultRetcodeDescription());
+               Print("SELL trailing failed: ",
+                     trade.ResultRetcodeDescription());
          }
       }
    }
@@ -388,8 +397,13 @@ bool OpenTrade(string signal, double atr)
       );
    }
 
-   if(result && trade.ResultRetcode() == TRADE_RETCODE_DONE ||
-      trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL)
+   //==================== FIX RETCODE CONDITION ====================
+
+   uint retcode = trade.ResultRetcode();
+
+   if(result &&
+      (retcode == TRADE_RETCODE_DONE ||
+       retcode == TRADE_RETCODE_DONE_PARTIAL))
    {
       lastSignalTime = iTime(_Symbol, SignalTF, 1);
 
@@ -405,7 +419,7 @@ bool OpenTrade(string signal, double atr)
    }
 
    Print("TRADE FAILED: ",
-         trade.ResultRetcode(),
+         retcode,
          " | ",
          trade.ResultRetcodeDescription());
 
