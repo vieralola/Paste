@@ -22,8 +22,8 @@ input double MinSellScore     = 6.0;   // Min Sell Score (0-10)
 input group "=== Trade Settings ==="
 input double FixedLot         = 0.01;  // Fixed Lot
 input int    MaxPositions     = 3;     // Max Concurrent Positions
-input int    StopLossPts      = 200;   // Stop Loss (points)
-input int    TakeProfitPts    = 400;   // Take Profit (points)
+input int    StopLossPts      = 150;   // Stop Loss (points)
+input int    TakeProfitPts    = 300;   // Take Profit (points)
 input int    MagicNumber      = 20241112;
 input int    SlippagePts      = 20;
 
@@ -33,12 +33,12 @@ input int    TrailStartPts    = 150;   // Start Trailing after X points
 input int    TrailStepPts     = 100;   // Trail Distance (points)
 
 input group "=== Filters ==="
-input bool   UseHTFFilter     = true;  // Only trade with HTF trend
+input bool   UseHTFFilter     = false;  // Only trade with HTF trend
 input ENUM_TIMEFRAMES HTF     = PERIOD_M5; // HTF timeframe
 input int    HTFEMAPeriod     = 50;    // HTF EMA Period
 input bool   UseSpreadFilter  = true;  // Block if spread too wide
 input int    MaxSpreadPts     = 40;    // Max Spread (points)
-input bool   UseTimeFilter    = true;  // Enable trading hours
+input bool   UseTimeFilter    = false;  // Enable trading hours
 input string StartTime        = "00:00"; // Start (HH:MM server)
 input string EndTime          = "23:59"; // End   (HH:MM server)
 
