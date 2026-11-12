@@ -1,0 +1,582 @@
+//+------------------------------------------------------------------+
+//|                                              NyaoScalpM1.mq5     |
+//|                          Scalper M1 - Trend Score Signal Strength|
+//|                          Education use only. No profitability    |
+//|                          guarantee.                              |
+//+------------------------------------------------------------------+
+#property copyright "Educational Scalper M1"
+#property version   "1.00"
+#property strict
+
+//--- Inputs
+input group "=== Signal Settings ==="
+input int    TrendRangeBars   = 100;   // Range Lookback (bars)
+input int    TrendEMAPeriod   = 50;    // EMA Period
+input int    TrendERBars      = 50;    // Efficiency Ratio Lookback
+input int    TrendROCBars     = 30;    // Momentum Lookback
+input int    TrendATRPeriod   = 14;    // ATR Period
+input int    SmoothCandles    = 3;     // Smoothing Candles (closed)
+input double MinBuyScore      = 6.0;   // Min Buy Score (0-10)
+input double MinSellScore     = 6.0;   // Min Sell Score (0-10)
+
+input group "=== Trade Settings ==="
+input double FixedLot         = 0.01;  // Fixed Lot
+input int    MaxPositions     = 3;     // Max Concurrent Positions
+input int    StopLossPts      = 200;   // Stop Loss (points)
+input int    TakeProfitPts    = 400;   // Take Profit (points)
+input int    MagicNumber      = 20241112;
+input int    SlippagePts      = 20;
+
+input group "=== Trailing ==="
+input bool   EnableTrailing   = true;  // Enable Trailing Stop
+input int    TrailStartPts    = 150;   // Start Trailing after X points
+input int    TrailStepPts     = 100;   // Trail Distance (points)
+
+input group "=== Filters ==="
+input bool   UseHTFFilter     = true;  // Only trade with HTF trend
+input ENUM_TIMEFRAMES HTF     = PERIOD_M5; // HTF timeframe
+input int    HTFEMAPeriod     = 50;    // HTF EMA Period
+input bool   UseSpreadFilter  = true;  // Block if spread too wide
+input int    MaxSpreadPts     = 40;    // Max Spread (points)
+input bool   UseTimeFilter    = true;  // Enable trading hours
+input string StartTime        = "00:00"; // Start (HH:MM server)
+input string EndTime          = "23:59"; // End   (HH:MM server)
+
+input group "=== Dashboard ==="
+input bool   ShowDashboard    = true;  // Show on-chart dashboard
+input int    DashX            = 10;    // X position (px)
+input int    DashY            = 20;    // Y position (px)
+input bool   EnableLogging    = true;  // Print log
+
+//--- Handles
+int hEma=INVALID_HANDLE, hAtr=INVALID_HANDLE, hHtfEma=INVALID_HANDLE;
+
+//--- State
+datetime lastBarTime = 0;
+double   lastBuyScore=0, lastSellScore=0;
+double   gBuyScore=0, gSellScore=0;
+string   gBuyReason="", gSellReason="";
+int      gPositions=0;
+double   gSpreadPts=0;
+string   gLastAction="idle";
+datetime gLastActionTime=0;
+double   gPeakEquity=0;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   //--- Force M1 (warning only, jangan fail — biar user lihat)
+   if(Period()!=PERIOD_M1)
+      Print("[WARN] EA ini dioptimasi untuk M1. TF saat ini: ", EnumToString((ENUM_TIMEFRAMES)Period()));
+
+   hEma    = iMA(_Symbol, _Period, TrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   hAtr    = iATR(_Symbol, _Period, TrendATRPeriod);
+   if(UseHTFFilter)
+      hHtfEma = iMA(_Symbol, HTF, HTFEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(hEma==INVALID_HANDLE || hAtr==INVALID_HANDLE || (UseHTFFilter && hHtfEma==INVALID_HANDLE))
+   {
+      Print("Error membuat indicator handle");
+      return INIT_FAILED;
+   }
+
+   gPeakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   EventSetTimer(1);
+   Print("NyaoScalpM1 aktif. Symbol=", _Symbol, " TF=", EnumToString((ENUM_TIMEFRAMES)Period()));
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   if(hEma!=INVALID_HANDLE)    IndicatorRelease(hEma);
+   if(hAtr!=INVALID_HANDLE)    IndicatorRelease(hAtr);
+   if(hHtfEma!=INVALID_HANDLE) IndicatorRelease(hHtfEma);
+   ObjectsDeleteAll(0, "NSM_");
+   Comment("");
+}
+
+//+------------------------------------------------------------------+
+//| GLASSMORPHISM CARD                                               |
+//+------------------------------------------------------------------+
+void DrawCard(string name,int x,int y,int w,int h)
+{
+   if(ObjectFind(0,name)<0)
+      ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0);
+
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_XSIZE,w);
+   ObjectSetInteger(0,name,OBJPROP_YSIZE,h);
+
+   ObjectSetInteger(0,name,OBJPROP_BGCOLOR,C'20,25,38');
+   ObjectSetInteger(0,name,OBJPROP_COLOR,C'65,75,100');
+   ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+}
+
+//+------------------------------------------------------------------+
+void OnTimer() { if(ShowDashboard) UpdateDashboard(); }
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   UpdateSpread();
+   if(ShowDashboard) UpdateDashboard();   // update cepat
+
+   //--- 1 bar baru M1
+   datetime t = iTime(_Symbol, _Period, 0);
+   if(t == lastBarTime) return;
+   lastBarTime = t;
+
+   //--- Cek kondisi blok
+   if(!IsWithinTradingHours())  { gLastAction="blocked: time"; SetAction(); return; }
+   if(IsSpreadTooWide())        { gLastAction="blocked: spread"; SetAction(); return; }
+
+   //--- Hitung skor BUY/SELL (closed candles only)
+   ComputeSignals(gBuyScore, gSellScore, gBuyReason, gSellReason);
+
+   //--- Cek posisi
+   gPositions = CountPositions();
+   if(gPositions >= MaxPositions) { gLastAction=StringFormat("blocked: max pos %d", gPositions); SetAction(); return; }
+
+   //--- Filter HTF
+   bool htfUp=false, htfDn=false;
+   if(UseHTFFilter) GetHTFDirection(htfUp, htfDn);
+
+   //--- Entry decision (yang skornya lebih tinggi)
+   if(gBuyScore >= MinBuyScore && gBuyScore > gSellScore)
+   {
+      if(UseHTFFilter && !htfUp) { gLastAction="blocked: HTF down"; SetAction(); return; }
+      if(OpenTrade(ORDER_TYPE_BUY)) { gLastAction="BUY opened"; SetAction(); }
+   }
+   else if(gSellScore >= MinSellScore && gSellScore > gBuyScore)
+   {
+      if(UseHTFFilter && !htfDn) { gLastAction="blocked: HTF up"; SetAction(); return; }
+      if(OpenTrade(ORDER_TYPE_SELL)) { gLastAction="SELL opened"; SetAction(); }
+   }
+   else
+   {
+      gLastAction = StringFormat("wait: B%.1f S%.1f", gBuyScore, gSellScore);
+      SetAction();
+   }
+}
+
+//+------------------------------------------------------------------+
+void SetAction()
+{
+   gLastActionTime = TimeCurrent();
+   if(EnableLogging) Print("[", TimeToString(gLastActionTime,TIME_MINUTES), "] ", gLastAction);
+}
+
+//+------------------------------------------------------------------+
+//| Signal Strength Model                                            |
+//| 4 komponen: range, EMA distance, efficiency, momentum            |
+//| semua -1..+1, rata-rata s, Buy=5+5s, Sell=5-5s                   |
+//+------------------------------------------------------------------+
+bool ComputeSignals(double &buyScore, double &sellScore, string &buyReason, string &sellReason)
+{
+   buyScore=0; sellScore=0; buyReason=""; sellReason="";
+
+   // Data closed candle [1] ke belakang
+   int need = MathMax(TrendRangeBars, MathMax(TrendERBars, TrendROCBars)) + 5;
+
+   double close[], high[], low[], ema[], atr[];
+   ArraySetAsSeries(close,true); ArraySetAsSeries(high,true);
+   ArraySetAsSeries(low,true);   ArraySetAsSeries(ema,true);
+   ArraySetAsSeries(atr,true);
+
+   if(CopyClose(_Symbol,_Period,1,need,close) < TrendRangeBars) return false;
+   if(CopyHigh (_Symbol,_Period,1,TrendRangeBars,high) < TrendRangeBars) return false;
+   if(CopyLow  (_Symbol,_Period,1,TrendRangeBars,low ) < TrendRangeBars) return false;
+   if(CopyBuffer(hEma,0,1,1,ema) < 1) return false;
+   if(CopyBuffer(hAtr,0,1,1,atr) < 1 || atr[0]<=0) return false;
+
+   int rangeBars = TrendRangeBars;
+   int erBars    = MathMin(TrendERBars, ArraySize(close)-1);
+   int rocBars   = MathMin(TrendROCBars, ArraySize(close)-1);
+
+   double c = close[0];
+
+   // High/Low range
+   int hiIdx = ArrayMaximum(high,0,rangeBars);
+   int loIdx = ArrayMinimum(low ,0,rangeBars);
+   double hi = high[hiIdx], lo = low[loIdx];
+
+   double rangeComp = (hi>lo) ? (c - (hi+lo)/2.0)/((hi-lo)/2.0) : 0;
+   if(rangeComp > 1) rangeComp = 1; if(rangeComp < -1) rangeComp = -1;
+
+   // EMA distance in ATR
+   double emaComp = MathTanh((c - ema[0]) / (4.0*atr[0]));
+
+   // Efficiency
+   double path = 0;
+   for(int k=0;k<erBars;k++) path += MathAbs(close[k]-close[k+1]);
+   double erComp = (path>0) ? MathTanh((c-close[erBars])/path/0.25) : 0;
+   if(erComp>1) erComp=1; if(erComp<-1) erComp=-1;
+
+   // Momentum
+   double rocComp = MathTanh((c-close[rocBars])/(12.0*atr[0]));
+   if(rocComp>1) rocComp=1; if(rocComp<-1) rocComp=-1;
+
+   double s = (rangeComp + emaComp + erComp + rocComp)/4.0;
+
+   double rawBuy  = 5.0 + 5.0*s;
+   double rawSell = 5.0 - 5.0*s;
+
+   // Smoothing: rata-rata dari N candle tertutup — hitung ulang per candle dengan rumus sama
+   // (untuk ringkas: pakai rawBuy/rawSell terakhir + bobot)
+   int N = MathMax(1, SmoothCandles);
+   double sumB=0, sumS=0, wt=0;
+   for(int i=1; i<=N; i++)
+   {
+      double sc = ComponentScore(i);
+      double b  = 5.0 + 5.0*sc;
+      double sel= 5.0 - 5.0*sc;
+      double w  = (double)(N - i + 1);
+      sumB += b*w; sumS += sel*w; wt += w;
+   }
+   buyScore  = (wt>0) ? sumB/wt : rawBuy;
+   sellScore = (wt>0) ? sumS/wt : rawSell;
+
+   if(buyScore<0) buyScore=0; if(buyScore>10) buyScore=10;
+   if(sellScore<0) sellScore=0; if(sellScore>10) sellScore=10;
+
+   buyReason  = StringFormat("Rng:%+.2f EMA:%+.2f Eff:%+.2f Mom:%+.2f",
+                             rangeComp, emaComp, erComp, rocComp);
+   sellReason = buyReason;
+   return true;
+}
+
+// Hitung s untuk candle ke-idx (1 = closed terakhir)
+double ComponentScore(int idx)
+{
+   int need = MathMax(TrendRangeBars, MathMax(TrendERBars, TrendROCBars)) + 5;
+   double close[], high[], low[], ema[], atr[];
+   ArraySetAsSeries(close,true); ArraySetAsSeries(high,true);
+   ArraySetAsSeries(low,true);   ArraySetAsSeries(ema,true); ArraySetAsSeries(atr,true);
+
+   if(CopyClose(_Symbol,_Period,idx,need,close) < TrendRangeBars) return 0;
+   if(CopyHigh (_Symbol,_Period,idx,TrendRangeBars,high) < TrendRangeBars) return 0;
+   if(CopyLow  (_Symbol,_Period,idx,TrendRangeBars,low ) < TrendRangeBars) return 0;
+   if(CopyBuffer(hEma,0,idx,1,ema) < 1) return 0;
+   if(CopyBuffer(hAtr,0,idx,1,atr) < 1 || atr[0]<=0) return 0;
+
+   int erBars  = MathMin(TrendERBars, ArraySize(close)-1);
+   int rocBars = MathMin(TrendROCBars, ArraySize(close)-1);
+
+   double c = close[0];
+   double hi = high[ArrayMaximum(high,0,TrendRangeBars)];
+   double lo = low [ArrayMinimum(low ,0,TrendRangeBars)];
+
+   double rangeComp = (hi>lo) ? (c-(hi+lo)/2.0)/((hi-lo)/2.0) : 0;
+   if(rangeComp>1) rangeComp=1; if(rangeComp<-1) rangeComp=-1;
+
+   double emaComp = MathTanh((c-ema[0])/(4.0*atr[0]));
+
+   double path=0;
+   for(int k=0;k<erBars;k++) path+=MathAbs(close[k]-close[k+1]);
+   double erComp = (path>0) ? MathTanh((c-close[erBars])/path/0.25) : 0;
+   if(erComp>1) erComp=1; if(erComp<-1) erComp=-1;
+
+   double rocComp = MathTanh((c-close[rocBars])/(12.0*atr[0]));
+   if(rocComp>1) rocComp=1; if(rocComp<-1) rocComp=-1;
+
+   return (rangeComp+emaComp+erComp+rocComp)/4.0;
+}
+
+//+------------------------------------------------------------------+
+bool GetHTFDirection(bool &up, bool &down)
+{
+   up=false; down=false;
+   if(hHtfEma==INVALID_HANDLE) return false;
+
+   double ema[];
+   ArraySetAsSeries(ema,true);
+   if(CopyBuffer(hHtfEma,0,1,2,ema) < 2) return false;
+
+   double htfClose = iClose(_Symbol, HTF, 1);
+   if(htfClose<=0 || ema[0]<=0) return false;
+
+   up   = (htfClose > ema[0] && ema[0] > ema[1]);
+   down = (htfClose < ema[0] && ema[0] < ema[1]);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+bool OpenTrade(ENUM_ORDER_TYPE type)
+{
+   double price = (type==ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                                         : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double point = _Point;
+   int    dg    = _Digits;
+
+   double sl=0, tp=0;
+   if(StopLossPts>0)
+      sl = (type==ORDER_TYPE_BUY) ? price - StopLossPts*point : price + StopLossPts*point;
+   if(TakeProfitPts>0)
+      tp = (type==ORDER_TYPE_BUY) ? price + TakeProfitPts*point : price - TakeProfitPts*point;
+
+   double lot = NormalizeLot(FixedLot);
+
+   MqlTradeRequest req; MqlTradeResult res;
+   ZeroMemory(req); ZeroMemory(res);
+   req.action      = TRADE_ACTION_DEAL;
+   req.symbol      = _Symbol;
+   req.volume      = lot;
+   req.type        = type;
+   req.price       = NormalizeDouble(price, dg);
+   req.sl          = (sl>0)?NormalizeDouble(sl,dg):0;
+   req.tp          = (tp>0)?NormalizeDouble(tp,dg):0;
+   req.deviation   = SlippagePts;
+   req.magic       = MagicNumber;
+   req.comment     = "NyaoScalpM1";
+   req.type_filling= GetFilling();
+
+   if(!OrderSend(req,res))
+   {
+      Print("OrderSend FAIL: ", GetLastError(), " retcode=", res.retcode);
+      return false;
+   }
+   if(res.retcode!=TRADE_RETCODE_DONE)
+   {
+      Print("Order retcode=", res.retcode, " ", res.comment);
+      return false;
+   }
+   Print("[ENTRY] ", (type==ORDER_TYPE_BUY?"BUY":"SELL"), " ", lot, " @", req.price,
+         " SL=", req.sl, " TP=", req.tp);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+ENUM_ORDER_TYPE_FILLING GetFilling()
+{
+   long fill = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((fill & SYMBOL_FILLING_FOK)!=0) return ORDER_FILLING_FOK;
+   if((fill & SYMBOL_FILLING_IOC)!=0) return ORDER_FILLING_IOC;
+   return ORDER_FILLING_RETURN;
+}
+
+double NormalizeLot(double lot)
+{
+   double minL=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxL=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(step<=0) step=0.01;
+   lot = MathMax(minL, MathMin(maxL, lot));
+   lot = MathRound(lot/step)*step;
+   int dg=0; double s=step;
+   while(dg<8 && MathAbs(s-MathRound(s))>1e-9){ s*=10; dg++; }
+   return NormalizeDouble(lot,dg);
+}
+
+//+------------------------------------------------------------------+
+int CountPositions()
+{
+   int n=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong t=PositionGetTicket(i);
+      if(t==0) continue;
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      n++;
+   }
+   return n;
+}
+
+//+------------------------------------------------------------------+
+void UpdateSpread()
+{
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   gSpreadPts = (ask-bid)/_Point;
+}
+
+bool IsSpreadTooWide()
+{
+   return (UseSpreadFilter && gSpreadPts>MaxSpreadPts);
+}
+
+//+------------------------------------------------------------------+
+bool IsWithinTradingHours()
+{
+   if(!UseTimeFilter) return true;
+
+   MqlDateTime now; TimeToStruct(TimeCurrent(), now);
+   int nowMin = now.hour*60 + now.min;
+
+   int sh,sm,eh,em;
+   if(!ParseHHMM(StartTime,sh,sm) || !ParseHHMM(EndTime,eh,em))
+   {
+      Print("Format jam salah. Pakai HH:MM");
+      return true;
+   }
+   int startMin = sh*60+sm;
+   int endMin   = eh*60+em;
+
+   if(startMin<=endMin) return (nowMin>=startMin && nowMin<=endMin);
+   return (nowMin>=startMin || nowMin<=endMin); // overnight
+}
+
+bool ParseHHMM(const string s,int &h,int &m)
+{
+   string p[];
+   if(StringSplit(s,':',p)!=2) return false;
+   h = (int)StringToInteger(p[0]);
+   m = (int)StringToInteger(p[1]);
+   return (h>=0 && h<24 && m>=0 && m<60);
+}
+
+//+------------------------------------------------------------------+
+//| Trailing stop                                                    |
+//+------------------------------------------------------------------+
+void ManageTrailing()
+{
+   if(!EnableTrailing) return;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong t=PositionGetTicket(i);
+      if(t==0) continue;
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+
+      long   ptype   = PositionGetInteger(POSITION_TYPE);
+      double open    = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl      = PositionGetDouble(POSITION_SL);
+      double tp      = PositionGetDouble(POSITION_TP);
+      double bid     = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      double ask     = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double point   = _Point;
+      double newSL   = sl;
+
+      if(ptype==POSITION_TYPE_BUY)
+      {
+         if((bid-open)/point >= TrailStartPts)
+         {
+            double cand = bid - TrailStepPts*point;
+            if(sl==0 || cand > sl) newSL = cand;
+         }
+      }
+      else
+      {
+         if((open-ask)/point >= TrailStartPts)
+         {
+            double cand = ask + TrailStepPts*point;
+            if(sl==0 || cand < sl) newSL = cand;
+         }
+      }
+
+      if(newSL!=sl && newSL>0)
+      {
+         MqlTradeRequest req; MqlTradeResult res;
+         ZeroMemory(req); ZeroMemory(res);
+         req.action   = TRADE_ACTION_SLTP;
+         req.symbol   = _Symbol;
+         req.position = t;
+         req.sl       = NormalizeDouble(newSL,_Digits);
+         req.tp       = tp;
+         if(OrderSend(req,res) && res.retcode==TRADE_RETCODE_DONE)
+            if(EnableLogging) Print("[TRAIL] pos ", t, " SL -> ", req.sl);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Dashboard                                                        |
+//+------------------------------------------------------------------+
+void DrawLabel(string name,string text,int x,int y,int size,color clr,bool bold=false)
+{
+   if(ObjectFind(0,name)<0)
+   {
+      ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+      ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+   }
+   ObjectSetString (0,name,OBJPROP_TEXT,text);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,size);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+   ObjectSetString (0,name,OBJPROP_FONT, bold?"Arial Bold":"Arial");
+}
+
+void UpdateDashboard()
+{
+   if(!ShowDashboard) return;
+   if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE)) return;
+
+   int x = DashX+12;
+int y = DashY+10;
+int lh = 16;
+   color gold   = clrGold;
+   color white  = clrWhite;
+   color green  = clrLime;
+   color red    = clrTomato;
+   color orange = clrOrange;
+   color gray   = clrSilver;
+   
+   //==================== GLASS CARDS ====================
+
+DrawCard("NSM_MainCard",DashX,DashY,310,205);
+
+DrawCard("NSM_SignalCard",DashX+10,DashY+43,290,65);
+
+DrawCard("NSM_AccountCard",DashX+10,DashY+115,140,42);
+
+DrawCard("NSM_RiskCard",DashX+160,DashY+115,140,42);
+
+   double bal   = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq    = AccountInfoDouble(ACCOUNT_EQUITY);
+   double freeM = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   if(eq > gPeakEquity) gPeakEquity = eq;
+   double ddPct = (gPeakEquity>0) ? (gPeakEquity-eq)/gPeakEquity*100.0 : 0.0;
+
+   // Header
+   DrawLabel("NSM_Title","NyaoScalpM1 — Signal Strength Scalper",x,y,11,gold,true);
+   y+=lh+2;
+
+   // Status
+   string status="RUNNING"; color sc=green;
+   if(!IsWithinTradingHours()){ status="OFF-HOURS"; sc=gray; }
+   else if(IsSpreadTooWide()){ status="SPREAD HIGH"; sc=orange; }
+   else if(gPositions>=MaxPositions){ status="MAX POS"; sc=orange; }
+   DrawLabel("NSM_Status","Status: "+status,x,y,10,sc,true); y+=lh;
+
+   // Scores
+   color bc = (gBuyScore >=MinBuyScore && gBuyScore >gSellScore) ? green : white;
+   color selc= (gSellScore>=MinSellScore && gSellScore>gBuyScore) ? red   : white;
+   DrawLabel("NSM_Buy", StringFormat("BUY SCORE : %.2f  (min %.1f)",gBuyScore,MinBuyScore),x,y,10,bc,true);  y+=lh;
+   DrawLabel("NSM_Sell",StringFormat("SELL SCORE: %.2f  (min %.1f)",gSellScore,MinSellScore),x,y,10,selc,true);y+=lh;
+   DrawLabel("NSM_Reason","  "+gBuyReason,x,y,8,gray); y+=lh;
+
+   // Positions
+   DrawLabel("NSM_Pos",StringFormat("Positions: %d / %d",gPositions,MaxPositions),x,y,10,white); y+=lh;
+
+   // Account
+   DrawLabel("NSM_Bal", StringFormat("Balance: %.2f  Equity: %.2f",bal,eq),x,y,9,white); y+=lh;
+   DrawLabel("NSM_DD",  StringFormat("Peak DD: %.2f%%  FreeMargin: %.2f",ddPct,freeM),x,y,9,
+             (ddPct>10?red:white)); y+=lh;
+
+   // Spread & last action
+   DrawLabel("NSM_Spread",StringFormat("Spread: %.0f pts  Max: %d",gSpreadPts,MaxSpreadPts),x,y,9,
+             (IsSpreadTooWide()?red:white)); y+=lh;
+   DrawLabel("NSM_Action","Last: "+gLastAction+" @ "+TimeToString(gLastActionTime,TIME_MINUTES),x,y,8,gray);
+}
+
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,const long &lp,const double &dp,const string &sp)
+{
+   // optional: klik untuk hide/show dashboard
+}
+//+------------------------------------------------------------------+
