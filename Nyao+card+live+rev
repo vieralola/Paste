@@ -196,7 +196,6 @@ void OnTick()
 
 ENUM_ORDER_TYPE signalType = ORDER_TYPE_BUY;
 bool validSignal = false;
-
 if(gBuyScore >= MinBuyScore && gBuyScore > gSellScore)
 {
    signalType = ORDER_TYPE_BUY;
@@ -215,6 +214,7 @@ if(!validSignal)
    SetAction();
    return;
 }
+
 
 ENUM_ORDER_TYPE orderType = signalType;
 
