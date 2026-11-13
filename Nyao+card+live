@@ -231,6 +231,18 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Action Logger                                                    |
+//+------------------------------------------------------------------+
+void SetAction()
+{
+   gLastActionTime = TimeCurrent();
+
+   if(EnableLogging)
+      Print("[NyaoScalpM1] ", gLastAction);
+}
+
+//+------------------------------------------------------------------+
 //| Signal Strength Model                                            |
 //| 4 komponen: range, EMA distance, efficiency, momentum            |
 //| semua -1..+1, rata-rata s, Buy=5+5s, Sell=5-5s                   |
