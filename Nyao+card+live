@@ -285,17 +285,21 @@ bool ComputeSignals(int startShift, double &buyScore, double &sellScore, string 
    double rawBuy  = 5.0 + 5.0*s;
    double rawSell = 5.0 - 5.0*s;
 
-   // Smoothing: rata-rata dari N candle tertutup — hitung ulang per candle dengan rumus sama
-   // (untuk ringkas: pakai rawBuy/rawSell terakhir + bobot)
+   // Smoothing mengikuti mode entry:
+   // CANDLE_CLOSE: mulai shift 1
+   // INSTANT: mulai shift 0
    int N = MathMax(1, SmoothCandles);
    double sumB=0, sumS=0, wt=0;
-   for(int i=1; i<=N; i++)
+
+   for(int i=0; i<N; i++)
    {
-      double sc = ComponentScore(i);
+      double sc = ComponentScore(startShift+i);
       double b  = 5.0 + 5.0*sc;
       double sel= 5.0 - 5.0*sc;
-      double w  = (double)(N - i + 1);
-      sumB += b*w; sumS += sel*w; wt += w;
+      double w  = (double)(N-i);
+      sumB += b*w;
+      sumS += sel*w;
+      wt += w;
    }
    buyScore  = (wt>0) ? sumB/wt : rawBuy;
    sellScore = (wt>0) ? sumS/wt : rawSell;
