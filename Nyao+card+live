@@ -313,9 +313,6 @@ bool ComputeSignals(int startShift, double &buyScore, double &sellScore, string 
    return true;
 }
 
-
-}
-
 // Hitung s untuk candle ke-idx (1 = closed terakhir)
 double ComponentScore(int idx)
 {
