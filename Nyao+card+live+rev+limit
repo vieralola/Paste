@@ -44,7 +44,7 @@ input int    SlippagePts      = 20;
 input group "=== Entry Execution ==="
 input ENUM_EXECUTION_MODE ExecutionMode = EXEC_LIMIT;
 input int LimitOffsetPts = 50;
-input int PendingExpiryMinutes = 30;
+input int PendingExpiryMinutes = 10;
 
 input group "=== Trailing ==="
 input bool   EnableTrailing   = true;  // Enable Trailing Stop
