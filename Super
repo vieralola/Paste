@@ -22,12 +22,12 @@ enum ENUM_EXECUTION_MODE
 
 //--- Inputs
 input group "=== Signal Settings ==="
-input int    TrendRangeBars   = 100;   // Range Lookback (bars)
-input int    TrendEMAPeriod   = 50;    // EMA Period
-input int    TrendERBars      = 50;    // Efficiency Ratio Lookback
-input int    TrendROCBars     = 30;    // Momentum Lookback
+input int    TrendRangeBars   = 70;   // Range Lookback (bars)
+input int    TrendEMAPeriod   = 34;    // EMA Period
+input int    TrendERBars      = 30;    // Efficiency Ratio Lookback
+input int    TrendROCBars     = 15;    // Momentum Lookback
 input int    TrendATRPeriod   = 14;    // ATR Period
-input int    SmoothCandles    = 3;     // Smoothing Candles (closed)
+input int    SmoothCandles    = 2;     // Smoothing Candles (closed)
 input double MinBuyScore      = 6.0;   // Min Buy Score (0-10)
 input double MinSellScore     = 6.0;   // Min Sell Score (0-10)
 input ENUM_ENTRY_MODE EntryMode = ENTRY_CANDLE_CLOSE;
@@ -42,8 +42,8 @@ input double LotMultiplier         = 2.0;
 input double MaxRecoveryLot        = 1.5;
 
 input int    MaxPositions     = 3;     // Max Concurrent Positions
-input int    StopLossPts      = 150;   // Stop Loss (points)
-input int    TakeProfitPts    = 200;   // Take Profit (points)
+input int    StopLossPts      = 200;   // Stop Loss (points)
+input int    TakeProfitPts    = 300;   // Take Profit (points)
 input int    MagicNumber      = 20241112;
 input int    SlippagePts      = 20;
 
