@@ -83,6 +83,7 @@ double   lastBuyScore=0, lastSellScore=0;
 double   gBuyScore=0, gSellScore=0;
 string   gBuyReason="", gSellReason="";
 int      gPositions=0;
+int      gExposure=0;
 double   gSpreadPts=0;
 string   gLastAction="idle";
 datetime gLastActionTime=0;
@@ -271,10 +272,14 @@ void OnTick()
       return;
 
    gPositions=CountPositions();
+   gExposure=gPositions+CountPendingOrders();
 
-   if(gPositions>=MaxPositions)
+   // Auto Recovery hanya mengizinkan satu exposure
+   int maxExposure = EnableAutoLotRecovery ? 1 : MaxPositions;
+
+   if(gExposure>=maxExposure)
    {
-      gLastAction="blocked: max positions";
+      gLastAction="blocked: max exposure";
       SetAction();
       return;
    }
@@ -639,6 +644,28 @@ int CountPositions()
 }
 
 //+------------------------------------------------------------------+
+//| COUNT EA PENDING ORDERS                                          |
+//+------------------------------------------------------------------+
+int CountPendingOrders()
+{
+   int n=0;
+
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+
+      if(OrderGetInteger(ORDER_MAGIC)!=MagicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+
+      n++;
+   }
+
+   return n;
+}
+
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 void UpdateSpread()
 {
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
@@ -796,7 +823,7 @@ DrawCard("NSM_RiskCard",DashX+160,DashY+115,140,42);
    string status="RUNNING"; color sc=green;
    if(!IsWithinTradingHours()){ status="OFF-HOURS"; sc=gray; }
    else if(IsSpreadTooWide()){ status="SPREAD HIGH"; sc=orange; }
-   else if(gPositions>=MaxPositions){ status="MAX POS"; sc=orange; }
+   else if(gExposure >= (EnableAutoLotRecovery ? 1 : MaxPositions)){ status="MAX POS"; sc=orange; }
    DrawLabel("NSM_Status","Status: "+status,x,y,10,sc,true); y+=lh;
 
    // Scores
@@ -807,7 +834,7 @@ DrawCard("NSM_RiskCard",DashX+160,DashY+115,140,42);
    DrawLabel("NSM_Reason","  "+gBuyReason,x,y,8,gray); y+=lh;
 
    // Positions
-   DrawLabel("NSM_Pos",StringFormat("Positions: %d / %d",gPositions,MaxPositions),x,y,10,white); y+=lh;
+   DrawLabel("NSM_Pos",StringFormat("Exposure: %d / %d",gExposure,(EnableAutoLotRecovery ? 1 : MaxPositions)),x,y,10,white); y+=lh;
 
    // Account
    DrawLabel("NSM_Bal", StringFormat("Balance: %.2f  Equity: %.2f",bal,eq),x,y,9,white); y+=lh;
