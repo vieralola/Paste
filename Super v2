@@ -166,6 +166,10 @@ void UpdateRecoveryLot(bool isSL)
 //+------------------------------------------------------------------+
 //| CEK APAKAH POSITION ID MASIH TERBUKA                             |
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| CEK POSITION ID MASIH TERBUKA                                    |
+//+------------------------------------------------------------------+
 bool IsPositionIdentifierOpen(ulong positionId)
 {
    for(int i=PositionsTotal()-1; i>=0; i--)
@@ -180,7 +184,7 @@ bool IsPositionIdentifierOpen(ulong positionId)
 }
 
 //+------------------------------------------------------------------+
-//| AUTO LOT RECOVERY - HITUNG HASIL POSISI SECARA UTUH              |
+//| RECOVERY BERDASARKAN HASIL AKHIR POSISI                          |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(
    const MqlTradeTransaction &trans,
@@ -192,11 +196,7 @@ void OnTradeTransaction(
    if(trans.deal==0) return;
    if(!HistoryDealSelect(trans.deal)) return;
 
-   string symbol=HistoryDealGetString(trans.deal,DEAL_SYMBOL);
-   long magic=HistoryDealGetInteger(trans.deal,DEAL_MAGIC);
    long entry=HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
-
-   if(symbol!=_Symbol || magic!=MagicNumber) return;
 
    if(entry!=DEAL_ENTRY_OUT &&
       entry!=DEAL_ENTRY_OUT_BY &&
@@ -208,14 +208,12 @@ void OnTradeTransaction(
 
    if(positionId==0) return;
 
-   // Posisi masih terbuka berarti kemungkinan baru partial close.
    if(IsPositionIdentifierOpen(positionId))
    {
-      Print("[RECOVERY] Partial close. Menunggu posisi selesai.");
+      Print("[RECOVERY] Posisi belum selesai ditutup.");
       return;
    }
 
-   // Cegah posisi yang sama diproses lebih dari satu kali.
    string doneKey=StringFormat("NSM_DONE_%I64u",positionId);
 
    if(GlobalVariableCheck(doneKey))
@@ -223,27 +221,36 @@ void OnTradeTransaction(
 
    if(!HistorySelectByPosition(positionId))
    {
-      Print("[RECOVERY] Gagal membaca history posisi: ",positionId);
+      Print("[RECOVERY] History gagal. Position=",positionId);
       return;
    }
 
    double netProfit=0.0;
+   bool isOurPosition=false;
 
    for(int i=0; i<HistoryDealsTotal(); i++)
    {
       ulong deal=HistoryDealGetTicket(i);
       if(deal==0) continue;
 
-      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol)
-         continue;
+      long dealMagic=HistoryDealGetInteger(deal,DEAL_MAGIC);
+      long dealEntry=HistoryDealGetInteger(deal,DEAL_ENTRY);
 
-      if(HistoryDealGetInteger(deal,DEAL_MAGIC)!=MagicNumber)
-         continue;
+      // Validasi berdasarkan deal pembukaan milik EA.
+      if(dealEntry==DEAL_ENTRY_IN && dealMagic==MagicNumber)
+         isOurPosition=true;
 
+      // Hitung semua deal posisi, termasuk penutupan manual.
       netProfit+=HistoryDealGetDouble(deal,DEAL_PROFIT);
       netProfit+=HistoryDealGetDouble(deal,DEAL_SWAP);
       netProfit+=HistoryDealGetDouble(deal,DEAL_COMMISSION);
       netProfit+=HistoryDealGetDouble(deal,DEAL_FEE);
+   }
+
+   if(!isOurPosition)
+   {
+      Print("[RECOVERY] Bukan posisi EA. Magic tidak cocok.");
+      return;
    }
 
    Print("[RECOVERY] Position=",positionId,
