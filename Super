@@ -39,7 +39,7 @@ input double FixedLot         = 0.01;  // Fixed Lot
 input group "=== Auto Lot Recovery ==="
 input bool   EnableAutoLotRecovery = true;
 input double LotMultiplier         = 2.0;
-input double MaxRecoveryLot        = 0.08;
+input double MaxRecoveryLot        = 1.5;
 
 input int    MaxPositions     = 3;     // Max Concurrent Positions
 input int    StopLossPts      = 150;   // Stop Loss (points)
@@ -50,7 +50,7 @@ input int    SlippagePts      = 20;
 input group "=== Entry Execution ==="
 input ENUM_EXECUTION_MODE ExecutionMode = EXEC_LIMIT;
 input int LimitOffsetPts = 50;
-input int PendingExpiryMinutes = 5;
+input int PendingExpiryMinutes = 2;
 
 input group "=== Trailing ==="
 input bool   EnableTrailing   = true;  // Enable Trailing Stop
