@@ -162,58 +162,113 @@ void UpdateRecoveryLot(bool isSL)
 
 //+------------------------------------------------------------------+
 
+
+//+------------------------------------------------------------------+
+//| CEK APAKAH POSITION ID MASIH TERBUKA                             |
+//+------------------------------------------------------------------+
+bool IsPositionIdentifierOpen(ulong positionId)
+{
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+
+      if((ulong)PositionGetInteger(POSITION_IDENTIFIER)==positionId)
+         return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| AUTO LOT RECOVERY - HITUNG HASIL POSISI SECARA UTUH              |
+//+------------------------------------------------------------------+
 void OnTradeTransaction(
    const MqlTradeTransaction &trans,
    const MqlTradeRequest &request,
    const MqlTradeResult &result)
 {
    if(!EnableAutoLotRecovery) return;
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
-   if(trans.deal == 0) return;
+   if(trans.type!=TRADE_TRANSACTION_DEAL_ADD) return;
+   if(trans.deal==0) return;
    if(!HistoryDealSelect(trans.deal)) return;
 
-   string symbol = HistoryDealGetString(trans.deal,DEAL_SYMBOL);
-   long magic = HistoryDealGetInteger(trans.deal,DEAL_MAGIC);
-   long entry = HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
+   string symbol=HistoryDealGetString(trans.deal,DEAL_SYMBOL);
+   long magic=HistoryDealGetInteger(trans.deal,DEAL_MAGIC);
+   long entry=HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
 
-   if(symbol != _Symbol || magic != MagicNumber) return;
+   if(symbol!=_Symbol || magic!=MagicNumber) return;
 
-   if(entry != DEAL_ENTRY_OUT &&
-      entry != DEAL_ENTRY_OUT_BY &&
-      entry != DEAL_ENTRY_INOUT)
+   if(entry!=DEAL_ENTRY_OUT &&
+      entry!=DEAL_ENTRY_OUT_BY &&
+      entry!=DEAL_ENTRY_INOUT)
       return;
 
-   //==================== NET PROFIT ====================
+   ulong positionId=(ulong)HistoryDealGetInteger(
+      trans.deal,DEAL_POSITION_ID);
 
-   double profit =
-      HistoryDealGetDouble(trans.deal,DEAL_PROFIT) +
-      HistoryDealGetDouble(trans.deal,DEAL_SWAP) +
-      HistoryDealGetDouble(trans.deal,DEAL_COMMISSION) +
-      HistoryDealGetDouble(trans.deal,DEAL_FEE);
+   if(positionId==0) return;
 
-   Print("[RECOVERY] Deal=",trans.deal,
-         " Net=",DoubleToString(profit,2),
-         " CurrentLot=",gCurrentLot);
+   // Posisi masih terbuka berarti kemungkinan baru partial close.
+   if(IsPositionIdentifierOpen(positionId))
+   {
+      Print("[RECOVERY] Partial close. Menunggu posisi selesai.");
+      return;
+   }
 
-   // Profit: reset lot
-   if(profit > 0.000001)
+   // Cegah posisi yang sama diproses lebih dari satu kali.
+   string doneKey=StringFormat("NSM_DONE_%I64u",positionId);
+
+   if(GlobalVariableCheck(doneKey))
+      return;
+
+   if(!HistorySelectByPosition(positionId))
+   {
+      Print("[RECOVERY] Gagal membaca history posisi: ",positionId);
+      return;
+   }
+
+   double netProfit=0.0;
+
+   for(int i=0; i<HistoryDealsTotal(); i++)
+   {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0) continue;
+
+      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol)
+         continue;
+
+      if(HistoryDealGetInteger(deal,DEAL_MAGIC)!=MagicNumber)
+         continue;
+
+      netProfit+=HistoryDealGetDouble(deal,DEAL_PROFIT);
+      netProfit+=HistoryDealGetDouble(deal,DEAL_SWAP);
+      netProfit+=HistoryDealGetDouble(deal,DEAL_COMMISSION);
+      netProfit+=HistoryDealGetDouble(deal,DEAL_FEE);
+   }
+
+   Print("[RECOVERY] Position=",positionId,
+         " Net=",DoubleToString(netProfit,2),
+         " LotBefore=",DoubleToString(gCurrentLot,2));
+
+   if(netProfit>0.000001)
    {
       UpdateRecoveryLot(false);
-      Print("[RECOVERY] PROFIT CLOSE -> RESET LOT");
+      Print("[RECOVERY] PROFIT -> LOT RESET");
    }
-   // Loss: increase lot
-   else if(profit < -0.000001)
+   else if(netProfit < -0.000001)
    {
       UpdateRecoveryLot(true);
-      Print("[RECOVERY] LOSS CLOSE -> INCREASE LOT");
+      Print("[RECOVERY] LOSS -> LOT INCREASE");
    }
    else
    {
-      Print("[RECOVERY] BREAK EVEN -> LOT UNCHANGED");
+      Print("[RECOVERY] BREAK EVEN -> LOT TETAP");
    }
+
+   GlobalVariableSet(doneKey,TimeCurrent());
+   GlobalVariablesFlush();
 }
 
-//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
