@@ -90,6 +90,7 @@ datetime gLastActionTime=0;
 double   gPeakEquity=0;
 double   gCurrentLot=0;
 string   gLotGVName="";
+ulong gRecoveryPendingPosition=0;
 
 
 //+------------------------------------------------------------------+
@@ -186,6 +187,86 @@ bool IsPositionIdentifierOpen(ulong positionId)
 //+------------------------------------------------------------------+
 //| RECOVERY BERDASARKAN HASIL AKHIR POSISI                          |
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| PROSES RECOVERY SETELAH POSISI BENAR-BENAR TERTUTUP              |
+//+------------------------------------------------------------------+
+void ProcessRecoveryPending()
+{
+   if(!EnableAutoLotRecovery) return;
+
+   ulong positionId=gRecoveryPendingPosition;
+   if(positionId==0) return;
+
+   if(IsPositionIdentifierOpen(positionId))
+      return;
+
+   string doneKey=StringFormat("NSM_DONE_%I64u",positionId);
+
+   if(GlobalVariableCheck(doneKey))
+   {
+      gRecoveryPendingPosition=0;
+      return;
+   }
+
+   if(!HistorySelectByPosition(positionId))
+      return;
+
+   double netProfit=0.0;
+   bool isOurPosition=false;
+
+   for(int i=0; i<HistoryDealsTotal(); i++)
+   {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0) continue;
+
+      long dealMagic=HistoryDealGetInteger(deal,DEAL_MAGIC);
+      long dealEntry=HistoryDealGetInteger(deal,DEAL_ENTRY);
+
+      if(dealEntry==DEAL_ENTRY_IN && dealMagic==MagicNumber)
+         isOurPosition=true;
+
+      netProfit+=HistoryDealGetDouble(deal,DEAL_PROFIT);
+      netProfit+=HistoryDealGetDouble(deal,DEAL_SWAP);
+      netProfit+=HistoryDealGetDouble(deal,DEAL_COMMISSION);
+      netProfit+=HistoryDealGetDouble(deal,DEAL_FEE);
+   }
+
+   if(!isOurPosition)
+   {
+      Print("[RECOVERY] Posisi bukan milik EA: ",positionId);
+      gRecoveryPendingPosition=0;
+      return;
+   }
+
+   Print("[RECOVERY] FINAL Position=",positionId,
+         " Net=",DoubleToString(netProfit,2),
+         " LotBefore=",DoubleToString(gCurrentLot,2));
+
+   if(netProfit>0.000001)
+   {
+      UpdateRecoveryLot(false);
+      Print("[RECOVERY] PROFIT -> RESET ",DoubleToString(gCurrentLot,2));
+   }
+   else if(netProfit < -0.000001)
+   {
+      UpdateRecoveryLot(true);
+      Print("[RECOVERY] LOSS -> NEXT ",DoubleToString(gCurrentLot,2));
+   }
+   else
+   {
+      Print("[RECOVERY] BREAK EVEN -> LOT TETAP");
+   }
+
+   GlobalVariableSet(doneKey,TimeCurrent());
+   GlobalVariablesFlush();
+
+   gRecoveryPendingPosition=0;
+}
+
+//+------------------------------------------------------------------+
+//| DETEKSI TRANSAKSI PENUTUPAN                                      |
+//+------------------------------------------------------------------+
 void OnTradeTransaction(
    const MqlTradeTransaction &trans,
    const MqlTradeRequest &request,
@@ -208,72 +289,12 @@ void OnTradeTransaction(
 
    if(positionId==0) return;
 
-   if(IsPositionIdentifierOpen(positionId))
-   {
-      Print("[RECOVERY] Posisi belum selesai ditutup.");
-      return;
-   }
+   gRecoveryPendingPosition=positionId;
 
-   string doneKey=StringFormat("NSM_DONE_%I64u",positionId);
+   Print("[RECOVERY] Penutupan terdeteksi. Menunggu finalisasi: ",
+         positionId);
 
-   if(GlobalVariableCheck(doneKey))
-      return;
-
-   if(!HistorySelectByPosition(positionId))
-   {
-      Print("[RECOVERY] History gagal. Position=",positionId);
-      return;
-   }
-
-   double netProfit=0.0;
-   bool isOurPosition=false;
-
-   for(int i=0; i<HistoryDealsTotal(); i++)
-   {
-      ulong deal=HistoryDealGetTicket(i);
-      if(deal==0) continue;
-
-      long dealMagic=HistoryDealGetInteger(deal,DEAL_MAGIC);
-      long dealEntry=HistoryDealGetInteger(deal,DEAL_ENTRY);
-
-      // Validasi berdasarkan deal pembukaan milik EA.
-      if(dealEntry==DEAL_ENTRY_IN && dealMagic==MagicNumber)
-         isOurPosition=true;
-
-      // Hitung semua deal posisi, termasuk penutupan manual.
-      netProfit+=HistoryDealGetDouble(deal,DEAL_PROFIT);
-      netProfit+=HistoryDealGetDouble(deal,DEAL_SWAP);
-      netProfit+=HistoryDealGetDouble(deal,DEAL_COMMISSION);
-      netProfit+=HistoryDealGetDouble(deal,DEAL_FEE);
-   }
-
-   if(!isOurPosition)
-   {
-      Print("[RECOVERY] Bukan posisi EA. Magic tidak cocok.");
-      return;
-   }
-
-   Print("[RECOVERY] Position=",positionId,
-         " Net=",DoubleToString(netProfit,2),
-         " LotBefore=",DoubleToString(gCurrentLot,2));
-
-   if(netProfit>0.000001)
-   {
-      UpdateRecoveryLot(false);
-      Print("[RECOVERY] PROFIT -> LOT RESET");
-   }
-   else if(netProfit < -0.000001)
-   {
-      UpdateRecoveryLot(true);
-      Print("[RECOVERY] LOSS -> LOT INCREASE");
-   }
-   else
-   {
-      Print("[RECOVERY] BREAK EVEN -> LOT TETAP");
-   }
-
-   GlobalVariableSet(doneKey,TimeCurrent());
-   GlobalVariablesFlush();
+   ProcessRecoveryPending();
 }
 
 //+------------------------------------------------------------------+
@@ -321,6 +342,9 @@ void OnTick()
 
    // Trailing setiap tick
    ManageTrailing();
+
+   // Coba ulang recovery sampai posisi benar-benar tertutup
+   ProcessRecoveryPending();
 
    if(ShowDashboard)
       UpdateDashboard();
