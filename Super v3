@@ -30,7 +30,7 @@ input int    TrendATRPeriod   = 14;    // ATR Period
 input int    SmoothCandles    = 3;     // Smoothing Candles (closed)
 input double MinBuyScore      = 6.0;   // Min Buy Score (0-10)
 input double MinSellScore     = 6.0;   // Min Sell Score (0-10)
-input ENUM_ENTRY_MODE EntryMode = ENTRY_CANDLE_CLOSE;
+input ENUM_ENTRY_MODE EntryMode = ENTRY_INSTANT;
 input bool AutoReversal = false; // Auto Reversal
 
 input group "=== Trade Settings ==="
@@ -39,11 +39,11 @@ input double FixedLot         = 0.01;  // Fixed Lot
 input group "=== Auto Lot Recovery ==="
 input bool   EnableAutoLotRecovery = true;
 input double LotMultiplier         = 2.0;
-input double MaxRecoveryLot        = 0.08;
+input double MaxRecoveryLot        = 1.5;
 
 input int    MaxPositions     = 3;     // Max Concurrent Positions
 input int    StopLossPts      = 150;   // Stop Loss (points)
-input int    TakeProfitPts    = 300;   // Take Profit (points)
+input int    TakeProfitPts    = 200;   // Take Profit (points)
 input int    MagicNumber      = 20241112;
 input int    SlippagePts      = 20;
 
@@ -53,7 +53,7 @@ input int LimitOffsetPts = 50;
 input int PendingExpiryMinutes = 30;
 
 input group "=== Trailing ==="
-input bool   EnableTrailing   = true;  // Enable Trailing Stop
+input bool   EnableTrailing   = false;  // Enable Trailing Stop
 input int    TrailStartPts    = 150;   // Start Trailing after X points
 input int    TrailStepPts     = 100;   // Trail Distance (points)
 
