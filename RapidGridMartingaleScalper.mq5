@@ -79,7 +79,7 @@ input double TrailingStop = 1.0;
 int fastHandle = INVALID_HANDLE;
 int slowHandle = INVALID_HANDLE;
 
-datetime lastEntryTime = 0;\ndatetime lastReversalTime = 0;
+datetime lastEntryTime = 0;\datetime lastReversalTime = 0;
 double highestBasketProfit = 0;
 
 int CurrentSpread()
