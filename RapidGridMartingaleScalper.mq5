@@ -45,6 +45,16 @@ enum ENUM_DIRECTION
 
 input group "=== DIRECTION ==="
 input ENUM_DIRECTION DirectionMode = AUTO_EMA;
+
+//======================
+// AUTO REVERSAL
+//======================
+input group "=== AUTO REVERSAL ==="
+input bool EnableAutoReversal = true;
+input bool CloseOppositePositions = true;
+input bool ReverseImmediately = true;
+input int ReversalCooldownSeconds = 3;
+
 input int FastEMA = 20;
 input int SlowEMA = 50;
 
@@ -69,7 +79,7 @@ input double TrailingStop = 1.0;
 int fastHandle = INVALID_HANDLE;
 int slowHandle = INVALID_HANDLE;
 
-datetime lastEntryTime = 0;
+datetime lastEntryTime = 0;\ndatetime lastReversalTime = 0;
 double highestBasketProfit = 0;
 
 int CurrentSpread()
@@ -328,6 +338,43 @@ bool ManageBasket()
 }
 
 //======================
+// AUTO REVERSAL ENGINE
+//======================
+void ProcessAutoReversal()
+{
+   if(!EnableAutoReversal || DirectionMode != AUTO_EMA)
+      return;
+
+   if(TimeCurrent() - lastReversalTime < ReversalCooldownSeconds)
+      return;
+
+   int count = CountPositions();
+   if(count <= 0)
+      return;
+
+   int currentDirection = GetDirection();
+   int newDirection = GetSignal();
+
+   if(newDirection == 0 || newDirection == currentDirection)
+      return;
+
+   Print("AUTO REVERSAL DETECTED");
+
+   if(!CloseOppositePositions)
+      return;
+
+   CloseAll();
+
+   if(CountPositions() > 0)
+      return;
+
+   lastReversalTime = TimeCurrent();
+
+   if(ReverseImmediately)
+      OpenTrade(newDirection, 0);
+}
+
+//======================
 // ENTRY ENGINE
 //======================
 void ProcessEntry()
@@ -458,6 +505,8 @@ int OnInit()
 void OnTimer()
 {
    ManageBasket();
+
+   ProcessAutoReversal();
 
    ProcessEntry();
 
