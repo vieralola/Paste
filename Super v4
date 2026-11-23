@@ -31,8 +31,8 @@ input int    SmoothCandles    = 3;     // Smoothing Candles (closed)
 input double MinBuyScore      = 6.0;   // Min Buy Score (0-10)
 input double MinSellScore     = 6.0;   // Min Sell Score (0-10)
 input ENUM_ENTRY_MODE EntryMode = ENTRY_CANDLE_CLOSE;
-input bool AutoEntryWhenEmpty = true; // Force entry when no position
-input bool AutoReversal = false; // Auto Reversal
+input bool AutoEntryWhenEmpty = false; // Force entry when no position
+input bool AutoReversal = true; // Auto Reversal
 
 input group "=== Trade Settings ==="
 input double FixedLot         = 0.01;  // Fixed Lot
