@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                              NyaoScalpM1.mq5     |
+//|                                              VieraScalpM1.mq5     |
 //|                  Scalper M1 - Trend Score Signal Strength        |
 //+------------------------------------------------------------------+
 #property copyright "Educational Scalper M1"
@@ -1261,7 +1261,7 @@ void UpdateDashboard()
    string panel =
       "\n"
       "========================================\n"
-      "             NYAO SCALP M1\n"
+      "             VIERALOLA SCALP M1\n"
       "        SIGNAL STRENGTH ENGINE\n"
       "========================================\n"
       "\n"
