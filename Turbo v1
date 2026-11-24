@@ -1,0 +1,602 @@
+//+------------------------------------------------------------------+
+//|              VIERA AGGRESSIVE MULTI SCALPER                     |
+//|              Multi Entry + Basket TP/SL                         |
+//+------------------------------------------------------------------+
+#property strict
+#property version "1.10"
+#property description "Aggressive Multi Scalping Basket System"
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//======================
+// LOT & POSITION
+//======================
+input group "=== LOT & POSITION ==="
+input double FixedLot       = 0.01;
+input int MaxPositions      = 5;
+input ulong MagicNumber     = 24112026;
+
+//======================
+// SCALPING SIGNAL
+//======================
+input group "=== SCALPING SIGNAL ==="
+input ENUM_TIMEFRAMES TradeTF = PERIOD_M1;
+input int FastEMA           = 5;
+input int SlowEMA           = 13;
+input int RSIPeriod         = 7;
+input double RSI_Buy        = 52;
+input double RSI_Sell       = 48;
+
+//======================
+// ENTRY CONTROL
+//======================
+input group "=== ENTRY CONTROL ==="
+input int CooldownSeconds   = 3;
+input int MinDistancePoints = 100;
+input int MaxSpreadPoints   = 40;
+
+//======================
+// BASKET MANAGEMENT
+//======================
+input group "=== BASKET TP SL ==="
+input double BasketTP       = 1.50;
+input double BasketSL       = 1.00;
+
+input bool UseBasketTrail   = true;
+input double TrailStart     = 0.60;
+input double TrailLock      = 0.30;
+
+//======================
+// INDIVIDUAL PROTECTION
+//======================
+input group "=== INDIVIDUAL SL ==="
+input bool UseIndividualSL  = false;
+input int IndividualSL      = 150;
+
+//======================
+// DASHBOARD
+//======================
+input group "=== DASHBOARD ==="
+input bool ShowDashboard    = true;
+
+//======================
+// GLOBAL
+//======================
+int hFastEMA;
+int hSlowEMA;
+int hRSI;
+
+datetime lastEntryTime = 0;
+
+double highestBasketProfit = 0;
+
+bool basketClosing = false;
+
+//======================
+// INITIALIZATION
+//======================
+int OnInit()
+{
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(20);
+   trade.SetTypeFillingBySymbol(_Symbol);
+
+   hFastEMA = iMA(
+      _Symbol,TradeTF,FastEMA,0,
+      MODE_EMA,PRICE_CLOSE
+   );
+
+   hSlowEMA = iMA(
+      _Symbol,TradeTF,SlowEMA,0,
+      MODE_EMA,PRICE_CLOSE
+   );
+
+   hRSI = iRSI(
+      _Symbol,TradeTF,RSIPeriod,PRICE_CLOSE
+   );
+
+   if(hFastEMA == INVALID_HANDLE ||
+      hSlowEMA == INVALID_HANDLE ||
+      hRSI == INVALID_HANDLE)
+   {
+      Print("Indicator initialization failed");
+      return INIT_FAILED;
+   }
+
+   Print("VIERA AGGRESSIVE SCALPER STARTED");
+
+   return INIT_SUCCEEDED;
+}
+
+//======================
+// DEINITIALIZATION
+//======================
+void OnDeinit(const int reason)
+{
+   IndicatorRelease(hFastEMA);
+   IndicatorRelease(hSlowEMA);
+   IndicatorRelease(hRSI);
+
+   Comment("");
+}
+
+//======================
+// COUNT POSITIONS
+//======================
+int CountPositions()
+{
+   int count = 0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
+//======================
+// BASKET PROFIT
+//======================
+double BasketProfit()
+{
+   double total = 0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      {
+         total += PositionGetDouble(POSITION_PROFIT);
+         total += PositionGetDouble(POSITION_SWAP);
+      }
+   }
+
+   return total;
+}
+
+//======================
+// CLOSE BASKET
+//======================
+void CloseBasket()
+{
+   basketClosing = true;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      {
+         if(!trade.PositionClose(ticket))
+         {
+            Print("Close failed: ",
+                  ticket," ",
+                  trade.ResultRetcodeDescription());
+         }
+      }
+   }
+
+   if(CountPositions() == 0)
+   {
+      highestBasketProfit = 0;
+      basketClosing = false;
+   }
+}
+
+//======================
+// GET SIGNAL
+//======================
+int GetSignal()
+{
+   double fast[2];
+   double slow[2];
+   double rsi[2];
+
+   ArraySetAsSeries(fast,true);
+   ArraySetAsSeries(slow,true);
+   ArraySetAsSeries(rsi,true);
+
+   if(CopyBuffer(hFastEMA,0,0,2,fast)<2) return 0;
+   if(CopyBuffer(hSlowEMA,0,0,2,slow)<2) return 0;
+   if(CopyBuffer(hRSI,0,0,2,rsi)<2) return 0;
+
+   // BUY SIGNAL
+   if(fast[1] > slow[1] && rsi[1] >= RSI_Buy)
+      return 1;
+
+   // SELL SIGNAL
+   if(fast[1] < slow[1] && rsi[1] <= RSI_Sell)
+      return -1;
+
+   return 0;
+}
+
+//======================
+// CHECK OPPOSITE
+//======================
+bool HasOppositePosition(int direction)
+{
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if(direction == 1 && type == POSITION_TYPE_SELL)
+         return true;
+
+      if(direction == -1 && type == POSITION_TYPE_BUY)
+         return true;
+   }
+
+   return false;
+}
+
+//======================
+// CHECK ENTRY DISTANCE
+//======================
+bool CheckEntryDistance(int direction)
+{
+   double currentPrice =
+      direction == 1 ?
+      SymbolInfoDouble(_Symbol,SYMBOL_ASK):
+      SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if(direction == 1 && type != POSITION_TYPE_BUY)
+         continue;
+
+      if(direction == -1 && type != POSITION_TYPE_SELL)
+         continue;
+
+      double openPrice =
+         PositionGetDouble(POSITION_PRICE_OPEN);
+
+      double distance =
+         MathAbs(currentPrice-openPrice)/_Point;
+
+      if(distance < MinDistancePoints)
+         return false;
+   }
+
+   return true;
+}
+
+//======================
+// NORMALIZE LOT
+//======================
+double NormalizeLot(double lot)
+{
+   double minLot =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+   double maxLot =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+
+   double step =
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+
+   if(step <= 0) return 0;
+
+   lot = MathMax(minLot,MathMin(maxLot,lot));
+
+   lot = MathFloor(lot/step+0.0000001)*step;
+
+   int digits = 0;
+   double temp = step;
+
+   while(digits < 8 &&
+         MathAbs(temp-MathRound(temp)) > 0.00000001)
+   {
+      temp *= 10;
+      digits++;
+   }
+
+   return NormalizeDouble(lot,digits);
+}
+
+//======================
+// OPEN POSITION
+//======================
+void OpenPosition(int direction)
+{
+   if(direction == 0) return;
+
+   if(basketClosing) return;
+
+   if(CountPositions() >= MaxPositions)
+      return;
+
+   if(HasOppositePosition(direction))
+      return;
+
+   if(TimeCurrent()-lastEntryTime < CooldownSeconds)
+      return;
+
+   if(!CheckEntryDistance(direction))
+      return;
+
+   double lot = NormalizeLot(FixedLot);
+
+   if(lot <= 0) return;
+
+   double sl = 0;
+
+   if(UseIndividualSL)
+   {
+      if(direction == 1)
+      {
+         sl = SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+              - IndividualSL*_Point;
+      }
+      else
+      {
+         sl = SymbolInfoDouble(_Symbol,SYMBOL_BID)
+              + IndividualSL*_Point;
+      }
+
+      sl = NormalizeDouble(sl,_Digits);
+   }
+
+   bool result = false;
+
+   if(direction == 1)
+   {
+      result = trade.Buy(
+         lot,_Symbol,0,sl,0,
+         "VIERA BUY"
+      );
+   }
+   else
+   {
+      result = trade.Sell(
+         lot,_Symbol,0,sl,0,
+         "VIERA SELL"
+      );
+   }
+
+   uint retcode = trade.ResultRetcode();
+
+   if(result &&
+      (retcode == TRADE_RETCODE_DONE ||
+       retcode == TRADE_RETCODE_DONE_PARTIAL ||
+       retcode == TRADE_RETCODE_PLACED))
+   {
+      lastEntryTime = TimeCurrent();
+
+      Print("ENTRY ",
+            direction == 1 ? "BUY":"SELL",
+            " LOT: ",lot);
+   }
+   else
+   {
+      Print("ENTRY FAILED: ",
+            trade.ResultRetcodeDescription());
+   }
+}
+
+//======================
+// BASKET MANAGEMENT
+//======================
+void ManageBasket()
+{
+   int positions = CountPositions();
+
+   if(positions == 0)
+   {
+      highestBasketProfit = 0;
+      basketClosing = false;
+      return;
+   }
+
+   double profit = BasketProfit();
+
+   // BASKET TAKE PROFIT
+   if(profit >= BasketTP)
+   {
+      Print("BASKET TP HIT: ",profit);
+      CloseBasket();
+      return;
+   }
+
+   // BASKET STOP LOSS
+   if(profit <= -BasketSL)
+   {
+      Print("BASKET SL HIT: ",profit);
+      CloseBasket();
+      return;
+   }
+
+   // BASKET TRAILING
+   if(UseBasketTrail)
+   {
+      if(profit >= TrailStart)
+      {
+         if(profit > highestBasketProfit)
+            highestBasketProfit = profit;
+      }
+
+      if(highestBasketProfit >= TrailStart)
+      {
+         double lockProfit =
+            highestBasketProfit-TrailLock;
+
+         if(profit <= lockProfit)
+         {
+            Print("BASKET TRAILING HIT: ",profit);
+            CloseBasket();
+            return;
+         }
+      }
+   }
+}
+
+//======================
+// MARKET CONDITION
+//======================
+string MarketCondition()
+{
+   double fast[3];
+   double slow[3];
+
+   ArraySetAsSeries(fast,true);
+   ArraySetAsSeries(slow,true);
+
+   if(CopyBuffer(hFastEMA,0,0,3,fast)<3)
+      return "LOADING";
+
+   if(CopyBuffer(hSlowEMA,0,0,3,slow)<3)
+      return "LOADING";
+
+   double gap =
+      MathAbs(fast[1]-slow[1])/_Point;
+
+   if(gap < 30)
+      return "SIDEWAYS";
+
+   return "TREND";
+}
+
+//======================
+// DASHBOARD
+//======================
+void Dashboard()
+{
+   if(!ShowDashboard)
+   {
+      Comment("");
+      return;
+   }
+
+   int buy = 0;
+   int sell = 0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if(type == POSITION_TYPE_BUY) buy++;
+      if(type == POSITION_TYPE_SELL) sell++;
+   }
+
+   double profit = BasketProfit();
+
+   string direction =
+      buy > 0 ? "BUY":
+      sell > 0 ? "SELL":"WAITING";
+
+   string status =
+      basketClosing ? "CLOSING":"ACTIVE";
+
+   string dash = StringFormat(
+      "\n"
+      "================================\n"
+      "     VIERA AGGRESSIVE SCALPER\n"
+      "================================\n"
+      " SYMBOL       : %s\n"
+      " TIMEFRAME    : M1\n"
+      " MARKET       : %s\n"
+      " DIRECTION    : %s\n"
+      "--------------------------------\n"
+      " BUY          : %d\n"
+      " SELL         : %d\n"
+      " POSITIONS    : %d / %d\n"
+      "--------------------------------\n"
+      " FLOATING     : $%.2f\n"
+      " BASKET TP    : $%.2f\n"
+      " BASKET SL    : -$%.2f\n"
+      " TRAIL PEAK   : $%.2f\n"
+      "--------------------------------\n"
+      " EA STATUS    : %s\n"
+      "================================",
+      _Symbol,
+      MarketCondition(),
+      direction,
+      buy,
+      sell,
+      buy+sell,
+      MaxPositions,
+      profit,
+      BasketTP,
+      BasketSL,
+      highestBasketProfit,
+      status
+   );
+
+   Comment(dash);
+}
+
+//======================
+// MAIN TICK
+//======================
+void OnTick()
+{
+   // Basket always active
+   ManageBasket();
+
+   Dashboard();
+
+   if(basketClosing)
+      return;
+
+   // SPREAD FILTER
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   double spread = (ask-bid)/_Point;
+
+   if(spread > MaxSpreadPoints)
+      return;
+
+   // SIGNAL EVERY TICK
+   int signal = GetSignal();
+
+   if(signal != 0)
+      OpenPosition(signal);
+}
+//+------------------------------------------------------------------+
