@@ -1,10 +1,9 @@
 //+------------------------------------------------------------------+
-//|              VIERA AGGRESSIVE MULTI SCALPER                     |
-//|              Multi Entry + Basket TP/SL                         |
+//|             VIERA AGGRESSIVE MULTI SCALPER                      |
+//|             Multi Entry + Basket + Auto Reversal                |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.10"
-#property description "Aggressive Multi Scalping Basket System"
+#property version "1.20"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -37,9 +36,9 @@ input int MinDistancePoints = 100;
 input int MaxSpreadPoints   = 40;
 
 //======================
-// BASKET MANAGEMENT
+// BASKET TP SL
 //======================
-input group "=== BASKET TP SL ==="
+input group "=== BASKET MANAGEMENT ==="
 input double BasketTP       = 1.50;
 input double BasketSL       = 1.00;
 
@@ -48,7 +47,14 @@ input double TrailStart     = 0.60;
 input double TrailLock      = 0.30;
 
 //======================
-// INDIVIDUAL PROTECTION
+// AUTO REVERSAL
+//======================
+input group "=== AUTO REVERSAL ==="
+input bool EnableAutoReversal = true;
+input int ReversalCooldown    = 2;
+
+//======================
+// INDIVIDUAL SL
 //======================
 input group "=== INDIVIDUAL SL ==="
 input bool UseIndividualSL  = false;
@@ -61,17 +67,22 @@ input group "=== DASHBOARD ==="
 input bool ShowDashboard    = true;
 
 //======================
-// GLOBAL
+// GLOBAL VARIABLES
 //======================
-int hFastEMA;
-int hSlowEMA;
-int hRSI;
+int hFastEMA = INVALID_HANDLE;
+int hSlowEMA = INVALID_HANDLE;
+int hRSI     = INVALID_HANDLE;
 
 datetime lastEntryTime = 0;
+datetime lastReversalTime = 0;
 
 double highestBasketProfit = 0;
 
+int pendingReversal = 0;
+
 bool basketClosing = false;
+
+string EA_NAME = "VIERA AGGRESSIVE SCALPER";
 
 //======================
 // INITIALIZATION
@@ -81,6 +92,18 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(20);
    trade.SetTypeFillingBySymbol(_Symbol);
+
+   // Multi position requires hedging
+   ENUM_ACCOUNT_MARGIN_MODE mode =
+      (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(
+         ACCOUNT_MARGIN_MODE
+      );
+
+   if(mode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   {
+      Print("ERROR: EA membutuhkan akun HEDGING!");
+      return INIT_FAILED;
+   }
 
    hFastEMA = iMA(
       _Symbol,TradeTF,FastEMA,0,
@@ -104,7 +127,12 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   Print("VIERA AGGRESSIVE SCALPER STARTED");
+   Print("================================");
+   Print(EA_NAME," STARTED");
+   Print("Basket TP: $",BasketTP);
+   Print("Basket SL: $",BasketSL);
+   Print("Auto Reversal: ",EnableAutoReversal);
+   Print("================================");
 
    return INIT_SUCCEEDED;
 }
@@ -114,9 +142,14 @@ int OnInit()
 //======================
 void OnDeinit(const int reason)
 {
-   IndicatorRelease(hFastEMA);
-   IndicatorRelease(hSlowEMA);
-   IndicatorRelease(hRSI);
+   if(hFastEMA != INVALID_HANDLE)
+      IndicatorRelease(hFastEMA);
+
+   if(hSlowEMA != INVALID_HANDLE)
+      IndicatorRelease(hSlowEMA);
+
+   if(hRSI != INVALID_HANDLE)
+      IndicatorRelease(hRSI);
 
    Comment("");
 }
@@ -132,7 +165,8 @@ int CountPositions()
    {
       ulong ticket = PositionGetTicket(i);
 
-      if(ticket == 0) continue;
+      if(ticket == 0)
+         continue;
 
       if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
          PositionGetInteger(POSITION_MAGIC) == MagicNumber)
@@ -155,7 +189,8 @@ double BasketProfit()
    {
       ulong ticket = PositionGetTicket(i);
 
-      if(ticket == 0) continue;
+      if(ticket == 0)
+         continue;
 
       if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
          PositionGetInteger(POSITION_MAGIC) == MagicNumber)
@@ -169,6 +204,36 @@ double BasketProfit()
 }
 
 //======================
+// COUNT BUY / SELL
+//======================
+void GetPositionCounts(int &buy,int &sell)
+{
+   buy = 0;
+   sell = 0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if(type == POSITION_TYPE_BUY)
+         buy++;
+
+      if(type == POSITION_TYPE_SELL)
+         sell++;
+   }
+}
+
+//======================
 // CLOSE BASKET
 //======================
 void CloseBasket()
@@ -179,17 +244,18 @@ void CloseBasket()
    {
       ulong ticket = PositionGetTicket(i);
 
-      if(ticket == 0) continue;
+      if(ticket == 0)
+         continue;
 
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-         PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      if(!trade.PositionClose(ticket))
       {
-         if(!trade.PositionClose(ticket))
-         {
-            Print("Close failed: ",
-                  ticket," ",
-                  trade.ResultRetcodeDescription());
-         }
+         Print("CLOSE FAILED: ",
+               ticket," ",
+               trade.ResultRetcodeDescription());
       }
    }
 
@@ -205,23 +271,32 @@ void CloseBasket()
 //======================
 int GetSignal()
 {
-   double fast[2];
-   double slow[2];
-   double rsi[2];
+   double fast[];
+   double slow[];
+   double rsi[];
+
+   ArrayResize(fast,3);
+   ArrayResize(slow,3);
+   ArrayResize(rsi,3);
 
    ArraySetAsSeries(fast,true);
    ArraySetAsSeries(slow,true);
    ArraySetAsSeries(rsi,true);
 
-   if(CopyBuffer(hFastEMA,0,0,2,fast)<2) return 0;
-   if(CopyBuffer(hSlowEMA,0,0,2,slow)<2) return 0;
-   if(CopyBuffer(hRSI,0,0,2,rsi)<2) return 0;
+   if(CopyBuffer(hFastEMA,0,0,3,fast)<3)
+      return 0;
 
-   // BUY SIGNAL
+   if(CopyBuffer(hSlowEMA,0,0,3,slow)<3)
+      return 0;
+
+   if(CopyBuffer(hRSI,0,0,3,rsi)<3)
+      return 0;
+
+   // BUY
    if(fast[1] > slow[1] && rsi[1] >= RSI_Buy)
       return 1;
 
-   // SELL SIGNAL
+   // SELL
    if(fast[1] < slow[1] && rsi[1] <= RSI_Sell)
       return -1;
 
@@ -233,25 +308,15 @@ int GetSignal()
 //======================
 bool HasOppositePosition(int direction)
 {
-   for(int i=PositionsTotal()-1; i>=0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
+   int buy,sell;
 
-      if(ticket == 0) continue;
+   GetPositionCounts(buy,sell);
 
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
-         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-         continue;
+   if(direction == 1 && sell > 0)
+      return true;
 
-      ENUM_POSITION_TYPE type =
-         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-
-      if(direction == 1 && type == POSITION_TYPE_SELL)
-         return true;
-
-      if(direction == -1 && type == POSITION_TYPE_BUY)
-         return true;
-   }
+   if(direction == -1 && buy > 0)
+      return true;
 
    return false;
 }
@@ -270,7 +335,8 @@ bool CheckEntryDistance(int direction)
    {
       ulong ticket = PositionGetTicket(i);
 
-      if(ticket == 0) continue;
+      if(ticket == 0)
+         continue;
 
       if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
          PositionGetInteger(POSITION_MAGIC) != MagicNumber)
@@ -312,7 +378,8 @@ double NormalizeLot(double lot)
    double step =
       SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
 
-   if(step <= 0) return 0;
+   if(step <= 0)
+      return 0;
 
    lot = MathMax(minLot,MathMin(maxLot,lot));
 
@@ -334,27 +401,30 @@ double NormalizeLot(double lot)
 //======================
 // OPEN POSITION
 //======================
-void OpenPosition(int direction)
+bool OpenPosition(int direction)
 {
-   if(direction == 0) return;
+   if(direction == 0)
+      return false;
 
-   if(basketClosing) return;
+   if(basketClosing)
+      return false;
 
    if(CountPositions() >= MaxPositions)
-      return;
+      return false;
 
    if(HasOppositePosition(direction))
-      return;
+      return false;
 
    if(TimeCurrent()-lastEntryTime < CooldownSeconds)
-      return;
+      return false;
 
    if(!CheckEntryDistance(direction))
-      return;
+      return false;
 
    double lot = NormalizeLot(FixedLot);
 
-   if(lot <= 0) return;
+   if(lot <= 0)
+      return false;
 
    double sl = 0;
 
@@ -379,15 +449,13 @@ void OpenPosition(int direction)
    if(direction == 1)
    {
       result = trade.Buy(
-         lot,_Symbol,0,sl,0,
-         "VIERA BUY"
+         lot,_Symbol,0,sl,0,"VIERA BUY"
       );
    }
    else
    {
       result = trade.Sell(
-         lot,_Symbol,0,sl,0,
-         "VIERA SELL"
+         lot,_Symbol,0,sl,0,"VIERA SELL"
       );
    }
 
@@ -400,14 +468,101 @@ void OpenPosition(int direction)
    {
       lastEntryTime = TimeCurrent();
 
-      Print("ENTRY ",
+      Print("ENTRY SUCCESS: ",
             direction == 1 ? "BUY":"SELL",
             " LOT: ",lot);
+
+      return true;
    }
-   else
+
+   Print("ENTRY FAILED: ",
+         trade.ResultRetcodeDescription());
+
+   return false;
+}
+
+//======================
+// AUTO REVERSAL
+//======================
+void ManageAutoReversal(int signal)
+{
+   if(!EnableAutoReversal || signal == 0)
+      return;
+
+   if(pendingReversal != 0 || basketClosing)
+      return;
+
+   int buy,sell;
+
+   GetPositionCounts(buy,sell);
+
+   bool reverseBuy =
+      signal == -1 && buy > 0;
+
+   bool reverseSell =
+      signal == 1 && sell > 0;
+
+   if(!reverseBuy && !reverseSell)
+      return;
+
+   if(TimeCurrent()-lastReversalTime < ReversalCooldown)
+      return;
+
+   Print("================================");
+   Print("AUTO REVERSAL ACTIVATED");
+   Print("OLD DIRECTION: ",
+         reverseBuy ? "BUY":"SELL");
+   Print("NEW DIRECTION: ",
+         signal == 1 ? "BUY":"SELL");
+   Print("================================");
+
+   // Save new direction
+   pendingReversal = signal;
+
+   // Close all old positions
+   CloseBasket();
+
+   lastReversalTime = TimeCurrent();
+}
+
+//======================
+// PROCESS REVERSAL
+//======================
+void ProcessReversal()
+{
+   if(pendingReversal == 0)
+      return;
+
+   // Wait until all old positions are closed
+   if(CountPositions() > 0)
    {
-      Print("ENTRY FAILED: ",
-            trade.ResultRetcodeDescription());
+      CloseBasket();
+      return;
+   }
+
+   if(basketClosing)
+      return;
+
+   // Spread filter
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   double spread = (ask-bid)/_Point;
+
+   if(spread > MaxSpreadPoints)
+      return;
+
+   if(TimeCurrent()-lastReversalTime < ReversalCooldown)
+      return;
+
+   int direction = pendingReversal;
+
+   if(OpenPosition(direction))
+   {
+      pendingReversal = 0;
+
+      Print("REVERSAL SUCCESS: ",
+            direction == 1 ? "BUY":"SELL");
    }
 }
 
@@ -427,18 +582,24 @@ void ManageBasket()
 
    double profit = BasketProfit();
 
-   // BASKET TAKE PROFIT
+   // BASKET TP
    if(profit >= BasketTP)
    {
       Print("BASKET TP HIT: ",profit);
+
+      pendingReversal = 0;
+
       CloseBasket();
       return;
    }
 
-   // BASKET STOP LOSS
+   // BASKET SL
    if(profit <= -BasketSL)
    {
       Print("BASKET SL HIT: ",profit);
+
+      pendingReversal = 0;
+
       CloseBasket();
       return;
    }
@@ -460,6 +621,9 @@ void ManageBasket()
          if(profit <= lockProfit)
          {
             Print("BASKET TRAILING HIT: ",profit);
+
+            pendingReversal = 0;
+
             CloseBasket();
             return;
          }
@@ -472,8 +636,11 @@ void ManageBasket()
 //======================
 string MarketCondition()
 {
-   double fast[3];
-   double slow[3];
+   double fast[];
+   double slow[];
+
+   ArrayResize(fast,3);
+   ArrayResize(slow,3);
 
    ArraySetAsSeries(fast,true);
    ArraySetAsSeries(slow,true);
@@ -504,25 +671,9 @@ void Dashboard()
       return;
    }
 
-   int buy = 0;
-   int sell = 0;
+   int buy,sell;
 
-   for(int i=PositionsTotal()-1; i>=0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-
-      if(ticket == 0) continue;
-
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
-         PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-         continue;
-
-      ENUM_POSITION_TYPE type =
-         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-
-      if(type == POSITION_TYPE_BUY) buy++;
-      if(type == POSITION_TYPE_SELL) sell++;
-   }
+   GetPositionCounts(buy,sell);
 
    double profit = BasketProfit();
 
@@ -530,16 +681,21 @@ void Dashboard()
       buy > 0 ? "BUY":
       sell > 0 ? "SELL":"WAITING";
 
+   string reversal =
+      pendingReversal == 1 ? "PENDING BUY":
+      pendingReversal == -1 ? "PENDING SELL":
+      "READY";
+
    string status =
       basketClosing ? "CLOSING":"ACTIVE";
 
    string dash = StringFormat(
       "\n"
       "================================\n"
-      "     VIERA AGGRESSIVE SCALPER\n"
+      "    VIERA AGGRESSIVE SCALPER\n"
       "================================\n"
       " SYMBOL       : %s\n"
-      " TIMEFRAME    : M1\n"
+      " TIMEFRAME    : %s\n"
       " MARKET       : %s\n"
       " DIRECTION    : %s\n"
       "--------------------------------\n"
@@ -552,9 +708,13 @@ void Dashboard()
       " BASKET SL    : -$%.2f\n"
       " TRAIL PEAK   : $%.2f\n"
       "--------------------------------\n"
+      " AUTO REVERSAL: %s\n"
+      " REVERSAL     : %s\n"
+      "--------------------------------\n"
       " EA STATUS    : %s\n"
       "================================",
       _Symbol,
+      EnumToString(TradeTF),
       MarketCondition(),
       direction,
       buy,
@@ -565,6 +725,8 @@ void Dashboard()
       BasketTP,
       BasketSL,
       highestBasketProfit,
+      EnableAutoReversal ? "ON":"OFF",
+      reversal,
       status
    );
 
@@ -576,15 +738,24 @@ void Dashboard()
 //======================
 void OnTick()
 {
-   // Basket always active
+   // 1. Manage basket first
    ManageBasket();
 
+   // 2. Dashboard
    Dashboard();
 
+   // 3. Wait for closing
    if(basketClosing)
       return;
 
-   // SPREAD FILTER
+   // 4. Process pending reversal
+   if(pendingReversal != 0)
+   {
+      ProcessReversal();
+      return;
+   }
+
+   // 5. Spread filter
    double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
@@ -593,10 +764,19 @@ void OnTick()
    if(spread > MaxSpreadPoints)
       return;
 
-   // SIGNAL EVERY TICK
+   // 6. Get signal
    int signal = GetSignal();
 
-   if(signal != 0)
-      OpenPosition(signal);
+   if(signal == 0)
+      return;
+
+   // 7. Auto reversal
+   ManageAutoReversal(signal);
+
+   if(pendingReversal != 0 || basketClosing)
+      return;
+
+   // 8. Normal entry
+   OpenPosition(signal);
 }
 //+------------------------------------------------------------------+
