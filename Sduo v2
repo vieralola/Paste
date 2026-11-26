@@ -46,7 +46,7 @@ input bool   EnableAutoLotRecovery = true;
 input double LotMultiplier         = 2.0;
 input double MaxRecoveryLot        = 1.5;
 input int    AveragingStepPts      = 50;   // Jarak averaging tiap 50 pip/point saat Max Recovery Lot
-input int    BasketProfitPts       = 20;   // Target profit di atas BEP (point) untuk TP line dinamis
+input int    BasketProfitPts       = 20;   // Target profit di atas BEP (point) untuk 1 garis TP bersama
 
 //==================== POSITION SETTINGS ====================
 
@@ -513,7 +513,7 @@ void OnTick()
    gPositions = CountPositions();
    gExposure = gPositions + CountPendingOrders();
 
-   // Sesuaikan TP dynamic (BEP + profit) untuk semua posisi terbuka
+   // Sesuaikan TP dynamic (1 garis TP bersama bergeser mengikuti BEP) untuk semua posisi terbuka
    AdjustBasketTP();
 
    bool isMaxRecovery = (EnableAutoLotRecovery && gCurrentLot >= MaxRecoveryLot);
@@ -930,7 +930,7 @@ bool CheckAveragingTrigger(ENUM_ORDER_TYPE &averagingType)
 }
 
 //+------------------------------------------------------------------+
-//| ADJUST DYNAMIC BASKET TP (GESER SESUAI BEP + PROFIT SEDIKIT)      |
+//| ADJUST DYNAMIC BASKET TP (1 GARIS TP BERSAMA, GESER MENGIKUTI BEP) |
 //+------------------------------------------------------------------+
 void AdjustBasketTP()
 {
@@ -998,13 +998,13 @@ void AdjustBasketTP()
                req.action = TRADE_ACTION_SLTP;
                req.symbol = _Symbol;
                req.position = t;
-               req.sl = PositionGetDouble(POSITION_SL);
+               req.sl = 0; // Tanpa SL
                req.tp = targetTP;
 
                if(!OrderSend(req, res))
                {
                   if(EnableLogging)
-                     Print("[WARN] AdjustBasketTP Modify failed, retcode=", res.retcode);
+                     Print("[WARN] AdjustBasketTP BUY modify failed, retcode=", res.retcode);
                }
             }
          }
@@ -1037,13 +1037,13 @@ void AdjustBasketTP()
                req.action = TRADE_ACTION_SLTP;
                req.symbol = _Symbol;
                req.position = t;
-               req.sl = PositionGetDouble(POSITION_SL);
+               req.sl = 0; // Tanpa SL
                req.tp = targetTP;
 
                if(!OrderSend(req, res))
                {
                   if(EnableLogging)
-                     Print("[WARN] AdjustBasketTP Modify failed, retcode=", res.retcode);
+                     Print("[WARN] AdjustBasketTP SELL modify failed, retcode=", res.retcode);
                }
             }
          }
@@ -1099,14 +1099,22 @@ bool OpenTrade(ENUM_ORDER_TYPE type)
    }
    else
    {
-      sl = 0; // Jangan di stop loss jika menyentuh max recovery lot (mode averaging)
+      sl = 0; // Tanpa SL di max recovery / averaging
    }
 
+   int currentPositions = CountPositions();
    if(TakeProfitPts > 0)
    {
-      tp = (type == ORDER_TYPE_BUY)
-         ? price + TakeProfitPts * point
-         : price - TakeProfitPts * point;
+      if(!isMaxRecovery || currentPositions == 0)
+      {
+         tp = (type == ORDER_TYPE_BUY)
+            ? price + TakeProfitPts * point
+            : price - TakeProfitPts * point;
+      }
+      else
+      {
+         tp = 0; // Averaging entries tanpa TP awal, langsung diatur bersama via AdjustBasketTP
+      }
    }
 
    // Validate against broker stops level
