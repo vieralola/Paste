@@ -513,8 +513,11 @@ void OnTick()
    gPositions = CountPositions();
    gExposure = gPositions + CountPendingOrders();
 
-   // Sesuaikan TP dynamic (1 garis TP bersama bergeser mengikuti BEP) untuk semua posisi terbuka
-   AdjustBasketTP();
+   // Sesuaikan TP dynamic (1 garis TP bersama bergeser mengikuti BEP) HANYA SAAT MAX RECOVERY LOT
+   if(EnableAutoLotRecovery && gCurrentLot >= MaxRecoveryLot)
+   {
+      AdjustBasketTP();
+   }
 
    bool isMaxRecovery = (EnableAutoLotRecovery && gCurrentLot >= MaxRecoveryLot);
    int maxExposure = isMaxRecovery ? MaxPositions : (EnableAutoLotRecovery ? 1 : MaxPositions);
@@ -934,6 +937,9 @@ bool CheckAveragingTrigger(ENUM_ORDER_TYPE &averagingType)
 //+------------------------------------------------------------------+
 void AdjustBasketTP()
 {
+   if(!EnableAutoLotRecovery || gCurrentLot < MaxRecoveryLot)
+      return;
+
    if(CountPositions() <= 0)
       return;
 
