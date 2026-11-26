@@ -1001,7 +1001,12 @@ void AdjustBasketTP()
                req.sl = PositionGetDouble(POSITION_SL);
                req.tp = targetTP;
 
-               OrderSend(req, res);
+               bool sent = OrderSend(req, res);
+               if(!sent || res.retcode != TRADE_RETCODE_DONE)
+               {
+                  if(EnableLogging)
+                     Print("[WARN] AdjustBasketTP Modify failed, retcode=", res.retcode);
+               }
             }
          }
       }
@@ -1036,7 +1041,12 @@ void AdjustBasketTP()
                req.sl = PositionGetDouble(POSITION_SL);
                req.tp = targetTP;
 
-               OrderSend(req, res);
+               bool sent = OrderSend(req, res);
+               if(!sent || res.retcode != TRADE_RETCODE_DONE)
+               {
+                  if(EnableLogging)
+                     Print("[WARN] AdjustBasketTP Modify failed, retcode=", res.retcode);
+               }
             }
          }
       }
