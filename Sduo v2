@@ -32,7 +32,7 @@ input double MinSellScore     = 6.0;
 
 input ENUM_ENTRY_MODE EntryMode = ENTRY_CANDLE_CLOSE;
 input bool AutoEntryWhenEmpty = false;
-input bool AutoReversal = false;
+input bool AutoReversal = true;
 
 //==================== TRADE SETTINGS ====================
 
@@ -44,8 +44,9 @@ input double FixedLot = 0.01;
 input group "=== Auto Lot Recovery ==="
 input bool   EnableAutoLotRecovery = true;
 input double LotMultiplier         = 2.0;
-input double MaxRecoveryLot        = 0.08;
+input double MaxRecoveryLot        = 1.5;
 input int    AveragingStepPts      = 50;   // Jarak averaging tiap 50 pip/point saat Max Recovery Lot
+input int    BasketProfitPts       = 20;   // Target profit di atas BEP (point) untuk TP line dinamis
 
 //==================== POSITION SETTINGS ====================
 
@@ -435,160 +436,8 @@ void OnTimer()
 //+------------------------------------------------------------------+
 //| MAIN TICK                                                        |
 //+------------------------------------------------------------------+
-
-//+------------------------------------------------------------------+
-//| CLOSE SINGLE POSITION BY TICKET                                  |
-//+------------------------------------------------------------------+
-bool ClosePosition(ulong ticket)
-{
-   MqlTradeRequest req;
-   MqlTradeResult res;
-   ZeroMemory(req);
-   ZeroMemory(res);
-
-   if(!PositionSelectByTicket(ticket))
-      return false;
-
-   req.action = TRADE_ACTION_DEAL;
-   req.position = ticket;
-   req.symbol = PositionGetString(POSITION_SYMBOL);
-   req.volume = PositionGetDouble(POSITION_VOLUME);
-   req.deviation = SlippagePts;
-   req.magic = MagicNumber;
-
-   long type = PositionGetInteger(POSITION_TYPE);
-   if(type == POSITION_TYPE_BUY)
-   {
-      req.type = ORDER_TYPE_SELL;
-      req.price = SymbolInfoDouble(req.symbol, SYMBOL_BID);
-   }
-   else
-   {
-      req.type = ORDER_TYPE_BUY;
-      req.price = SymbolInfoDouble(req.symbol, SYMBOL_ASK);
-   }
-
-   req.type_filling = GetFilling();
-
-   return OrderSend(req, res) && (res.retcode == TRADE_RETCODE_DONE);
-}
-
-//+------------------------------------------------------------------+
-//| CHECK AND EXECUTE BASKET TAKE PROFIT (1 garis TP untuk semua pos) |
-//+------------------------------------------------------------------+
-void CheckBasketTakeProfit()
-{
-   if(CountPositions() <= 0)
-      return;
-
-   double totalBuyVolume = 0;
-   double sumBuyPriceVol = 0;
-   double totalSellVolume = 0;
-   double sumSellPriceVol = 0;
-   int buyCount = 0;
-   int sellCount = 0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong t = PositionGetTicket(i);
-      if(t == 0) continue;
-      if(!PositionSelectByTicket(t)) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-
-      long ptype = PositionGetInteger(POSITION_TYPE);
-      double vol = PositionGetDouble(POSITION_VOLUME);
-      double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
-
-      if(ptype == POSITION_TYPE_BUY)
-      {
-         buyCount++;
-         totalBuyVolume += vol;
-         sumBuyPriceVol += (priceOpen * vol);
-      }
-      else if(ptype == POSITION_TYPE_SELL)
-      {
-         sellCount++;
-         totalSellVolume += vol;
-         sumSellPriceVol += (priceOpen * vol);
-      }
-   }
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double point = _Point;
-
-   // Cek Basket TP untuk BUY
-   if(buyCount > 0 && totalBuyVolume > 0)
-   {
-      double avgBuyPrice = sumBuyPriceVol / totalBuyVolume;
-      double basketTPBuy = avgBuyPrice + TakeProfitPts * point;
-
-      if(bid >= basketTPBuy)
-      {
-         Print("[BASKET TP] BUY Basket TP hit at ", bid, " (Target: ", basketTPBuy, "). Closing all BUY positions.");
-         
-         for(int i = PositionsTotal() - 1; i >= 0; i--)
-         {
-            ulong t = PositionGetTicket(i);
-            if(t == 0) continue;
-            if(!PositionSelectByTicket(t)) continue;
-            if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
-            {
-               ClosePosition(t);
-            }
-         }
-
-         gCurrentLot = FixedLot;
-         if(gLotGVName != "")
-         {
-            GlobalVariableSet(gLotGVName, gCurrentLot);
-            GlobalVariablesFlush();
-         }
-         Print("[LOT RECOVERY] Basket TP hit -> Reset lot to FixedLot: ", gCurrentLot);
-      }
-   }
-
-   // Cek Basket TP untuk SELL
-   if(sellCount > 0 && totalSellVolume > 0)
-   {
-      double avgSellPrice = sumSellPriceVol / totalSellVolume;
-      double basketTPSell = avgSellPrice - TakeProfitPts * point;
-
-      if(ask <= basketTPSell)
-      {
-         Print("[BASKET TP] SELL Basket TP hit at ", ask, " (Target: ", basketTPSell, "). Closing all SELL positions.");
-
-         for(int i = PositionsTotal() - 1; i >= 0; i--)
-         {
-            ulong t = PositionGetTicket(i);
-            if(t == 0) continue;
-            if(!PositionSelectByTicket(t)) continue;
-            if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
-            {
-               ClosePosition(t);
-            }
-         }
-
-         gCurrentLot = FixedLot;
-         if(gLotGVName != "")
-         {
-            GlobalVariableSet(gLotGVName, gCurrentLot);
-            GlobalVariablesFlush();
-         }
-         Print("[LOT RECOVERY] Basket TP hit -> Reset lot to FixedLot: ", gCurrentLot);
-      }
-   }
-}
-
-
 void OnTick()
 {
-   CheckBasketTakeProfit();
    UpdateSpread();
 
    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -663,6 +512,9 @@ void OnTick()
 
    gPositions = CountPositions();
    gExposure = gPositions + CountPendingOrders();
+
+   // Sesuaikan TP dynamic (BEP + profit) untuk semua posisi terbuka
+   AdjustBasketTP();
 
    bool isMaxRecovery = (EnableAutoLotRecovery && gCurrentLot >= MaxRecoveryLot);
    int maxExposure = isMaxRecovery ? MaxPositions : (EnableAutoLotRecovery ? 1 : MaxPositions);
@@ -1075,6 +927,120 @@ bool CheckAveragingTrigger(ENUM_ORDER_TYPE &averagingType)
    }
 
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| ADJUST DYNAMIC BASKET TP (GESER SESUAI BEP + PROFIT SEDIKIT)      |
+//+------------------------------------------------------------------+
+void AdjustBasketTP()
+{
+   if(CountPositions() <= 0)
+      return;
+
+   double totalBuyVolume = 0;
+   double sumBuyPriceVol = 0;
+   double totalSellVolume = 0;
+   double sumSellPriceVol = 0;
+   int buyCount = 0;
+   int sellCount = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      long ptype = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
+
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         buyCount++;
+         totalBuyVolume += vol;
+         sumBuyPriceVol += (priceOpen * vol);
+      }
+      else if(ptype == POSITION_TYPE_SELL)
+      {
+         sellCount++;
+         totalSellVolume += vol;
+         sumSellPriceVol += (priceOpen * vol);
+      }
+   }
+
+   double point = _Point;
+
+   // Adjust BUY basket TP
+   if(buyCount > 0 && totalBuyVolume > 0)
+   {
+      double avgBuyPrice = sumBuyPriceVol / totalBuyVolume;
+      double targetTP = NormalizeDouble(avgBuyPrice + BasketProfitPts * point, _Digits);
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0) continue;
+         if(!PositionSelectByTicket(t)) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+         {
+            double currentTP = PositionGetDouble(POSITION_TP);
+            if(MathAbs(currentTP - targetTP) > _Point)
+            {
+               MqlTradeRequest req;
+               MqlTradeResult res;
+               ZeroMemory(req);
+               ZeroMemory(res);
+
+               req.action = TRADE_ACTION_SLTP;
+               req.symbol = _Symbol;
+               req.position = t;
+               req.sl = PositionGetDouble(POSITION_SL);
+               req.tp = targetTP;
+
+               OrderSend(req, res);
+            }
+         }
+      }
+   }
+
+   // Adjust SELL basket TP
+   if(sellCount > 0 && totalSellVolume > 0)
+   {
+      double avgSellPrice = sumSellPriceVol / totalSellVolume;
+      double targetTP = NormalizeDouble(avgSellPrice - BasketProfitPts * point, _Digits);
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0) continue;
+         if(!PositionSelectByTicket(t)) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+         {
+            double currentTP = PositionGetDouble(POSITION_TP);
+            if(MathAbs(currentTP - targetTP) > _Point)
+            {
+               MqlTradeRequest req;
+               MqlTradeResult res;
+               ZeroMemory(req);
+               ZeroMemory(res);
+
+               req.action = TRADE_ACTION_SLTP;
+               req.symbol = _Symbol;
+               req.position = t;
+               req.sl = PositionGetDouble(POSITION_SL);
+               req.tp = targetTP;
+
+               OrderSend(req, res);
+            }
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1531,9 +1497,7 @@ void UpdateDashboard()
       status = "SPREAD HIGH";
    else if(gRecoveryPendingPosition != 0)
       status = "LOT RECOVERY WAIT";
-   else if(EnableAutoLotRecovery && gCurrentLot >= MaxRecoveryLot)
-      status = "MAX RECOVERY AVERAGING";
-   else if(gExposure >= ((EnableAutoLotRecovery && gCurrentLot >= MaxRecoveryLot) ? MaxPositions : (EnableAutoLotRecovery ? 1 : MaxPositions)))
+   else if(gExposure >= (EnableAutoLotRecovery ? 1 : MaxPositions))
       status = "MAX EXPOSURE";
 
    string signal = "WAIT";
