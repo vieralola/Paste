@@ -32,7 +32,7 @@ input double MinSellScore     = 6.0;
 
 input ENUM_ENTRY_MODE EntryMode = ENTRY_CANDLE_CLOSE;
 input bool AutoEntryWhenEmpty = false;
-input bool AutoReversal = true;
+input bool AutoReversal = false;
 
 //==================== TRADE SETTINGS ====================
 
@@ -44,7 +44,7 @@ input double FixedLot = 0.01;
 input group "=== Auto Lot Recovery ==="
 input bool   EnableAutoLotRecovery = true;
 input double LotMultiplier         = 2.0;
-input double MaxRecoveryLot        = 1.5;
+input double MaxRecoveryLot        = 0.08;
 input int    AveragingStepPts      = 50;   // Jarak averaging tiap 50 pip/point saat Max Recovery Lot
 
 //==================== POSITION SETTINGS ====================
